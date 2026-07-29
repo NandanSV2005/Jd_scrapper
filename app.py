@@ -1,6 +1,6 @@
 """
 Job Scraper Pro - Streamlit Web Application
-Scrapes job listings from LinkedIn, Indeed, and Naukri.com
+Scrapes job listings from LinkedIn, Indeed, Naukri.com, and any generic page
 and exports them to Excel.
 """
 
@@ -23,6 +23,7 @@ from scrapers.base_scraper import BaseScraper
 from scrapers.indeed_scraper import IndeedScraper
 from scrapers.linkedin_scraper import LinkedInScraper
 from scrapers.naukri_scraper import NaukriScraper
+from scrapers.generic_scraper import GenericScraper
 from utils.excel_writer import ExcelWriter
 
 
@@ -95,6 +96,7 @@ def apply_custom_styles():
         .badge-indeed { background: #003D9E; }
         .badge-linkedin { background: #0077B5; }
         .badge-naukri { background: #E9542A; }
+        .badge-generic { background: #6B3FA0; }
 
         /* Stats */
         .stat-box {
@@ -113,6 +115,15 @@ def apply_custom_styles():
             font-size: 0.85rem;
             color: #666;
             margin-top: 0.2rem;
+        }
+
+        /* Info box */
+        .info-box {
+            background: #FFF8E1;
+            border-left: 4px solid #FFA000;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            margin: 1rem 0;
         }
 
         /* Footer */
@@ -139,7 +150,7 @@ def detect_source(url: str) -> str:
         return "LinkedIn"
     elif "naukri.com" in url_lower:
         return "Naukri"
-    return "Unknown"
+    return "Generic"
 
 
 def get_scraper(source: str):
@@ -150,6 +161,8 @@ def get_scraper(source: str):
         return LinkedInScraper()
     elif source == "Naukri":
         return NaukriScraper()
+    elif source in ("Generic", "Auto-Detect"):
+        return GenericScraper()
     return None
 
 
@@ -170,7 +183,7 @@ def main():
                     unsafe_allow_html=True)
         st.markdown(
             '<div class="app-subtitle">'
-            'Scrape job listings from LinkedIn, Indeed & Naukri — '
+            'Scrape job listings from LinkedIn, Indeed, Naukri & any website — '
             'export to Excel with bullet-pointed descriptions & deduplication'
             '</div>',
             unsafe_allow_html=True
@@ -179,7 +192,7 @@ def main():
     with col2:
         st.markdown(
             f'<div style="text-align:right;padding-top:0.8rem;color:#999;">'
-            f'<small>v1.0 • {datetime.now().strftime("%b %Y")}</small>'
+            f'<small>v2.0 • {datetime.now().strftime("%b %Y")}</small>'
             f'</div>',
             unsafe_allow_html=True
         )
@@ -194,6 +207,7 @@ def main():
         - 🔵 **LinkedIn Jobs**
         - 🔵 **Indeed**
         - 🔵 **Naukri.com**
+        - 🟣 **Any Website** (Generic)
         """)
 
         # Sample URLs
@@ -210,6 +224,9 @@ def main():
         Naukri:
         https://www.naukri.com/
           software-engineer-jobs
+
+        Any Page (Generic):
+        https://example.com/companies
         ```
         """)
 
@@ -218,8 +235,8 @@ def main():
         # About
         st.markdown("### ℹ️ About")
         st.markdown(
-            "Enter a job search URL, select the source, and scrape "
-            "job listings to an Excel file with deduplication."
+            "Enter any URL containing company/job listings, "
+            "select the source, and scrape data to an Excel file."
         )
 
     # ── Main Content ────────────────────────────────────────────────────
@@ -231,15 +248,15 @@ def main():
 
         with col1:
             url = st.text_input(
-                "**Job Search URL**",
-                placeholder="https://www.indeed.com/jobs?q=software+engineer",
-                help="Paste the URL of a job search results page",
+                "**Enter URL**",
+                placeholder="https://www.naukri.com/it-companies-in-india-cat116",
+                help="Paste the URL of a job search page, company directory, or any page with listings",
             )
 
         with col2:
             # Auto-detect source, but let user override
             detected_source = detect_source(url) if url else "Unknown"
-            source_options = ["Auto-Detect", "Indeed", "LinkedIn", "Naukri"]
+            source_options = ["Auto-Detect", "Indeed", "LinkedIn", "Naukri", "Generic"]
             default_idx = 0
             if detected_source != "Unknown":
                 try:
@@ -248,35 +265,81 @@ def main():
                     default_idx = 0
 
             selected_source = st.selectbox(
-                "**Job Source**",
+                "**Source**",
                 options=source_options,
-                index=0,
-                help="Select the job site to scrape (Auto-Detect recommended)",
+                index=default_idx if url and detected_source != "Unknown" else 0,
+                help="Select the website type (Auto-Detect recommended)",
             )
 
-        # Advanced options
+        # ── Advanced Options ────────────────────────────────────────────
         with st.expander("⚡ Advanced Options"):
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
+
             with col1:
                 use_playwright = st.checkbox(
-                    "Use Playwright (Browser)",
+                    "Use Playwright Browser",
                     value=True,
-                    help="Enables JavaScript rendering for LinkedIn. Requires Playwright to be installed.",
+                    help="Enables JavaScript rendering. Required for most modern sites.",
                 )
+                dedup_enabled = st.checkbox(
+                    "Enable Deduplication",
+                    value=True,
+                    help="Skip duplicate entries found in this session",
+                )
+
             with col2:
                 max_pages = st.number_input(
                     "Max pages to scrape",
                     min_value=1,
                     max_value=10,
                     value=1,
-                    help="Number of pages of results to scrape (1 page ≈ 15-20 jobs)",
+                    help="Only works with Indeed/LinkedIn/Naukri (not Generic)",
                 )
-            with col3:
-                dedup_enabled = st.checkbox(
-                    "Enable Deduplication",
-                    value=True,
-                    help="Skip job descriptions that have already been scraped in this session",
+
+            # ── Custom CSS Selectors (only shown for Generic mode) ────
+            css_company = ""
+            css_role = ""
+            css_desc = ""
+
+            show_css_selectors = (
+                selected_source == "Generic" or
+                (selected_source == "Auto-Detect" and detected_source in ("Unknown", "Generic")) or
+                (selected_source == "Auto-Detect" and not url)
+            )
+
+            if show_css_selectors:
+                st.markdown("---")
+                st.markdown("#### 🎯 Custom CSS Selectors (for Generic mode)")
+
+                st.markdown(
+                    '<div class="info-box">'
+                    '💡 <b>Don\'t know CSS selectors?</b> Just leave these blank — '
+                    'the scraper will try to detect data automatically.<br>'
+                    'If auto-detection fails, right-click an element on the page → '
+                    '"Inspect" → copy the CSS selector and paste it below.'
+                    '</div>',
+                    unsafe_allow_html=True
                 )
+
+                cols = st.columns(3)
+                with cols[0]:
+                    css_company = st.text_input(
+                        "Company CSS Selector",
+                        placeholder="e.g., .company-name, td:nth-child(1) a",
+                        help="CSS selector for company name elements",
+                    )
+                with cols[1]:
+                    css_role = st.text_input(
+                        "Job Role CSS Selector",
+                        placeholder="e.g., .job-title, td:nth-child(2)",
+                        help="CSS selector for job title/role elements",
+                    )
+                with cols[2]:
+                    css_desc = st.text_input(
+                        "Description CSS Selector",
+                        placeholder="e.g., .description, td:nth-child(3)",
+                        help="CSS selector for job description elements",
+                    )
 
         # Scrape button
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -298,12 +361,6 @@ def main():
             source = selected_source
             if source == "Auto-Detect":
                 source = detect_source(url)
-                if source == "Unknown":
-                    st.error(
-                        "❌ Could not auto-detect the job source. "
-                        "Please select the source manually."
-                    )
-                    st.stop()
 
             # Reset deduplication if enabled
             if dedup_enabled:
@@ -315,13 +372,31 @@ def main():
                 st.error(f"❌ No scraper available for {source}")
                 st.stop()
 
-            # Validate URL matches source
+            # Apply custom CSS selectors for Generic scraper
+            if isinstance(scraper, GenericScraper):
+                scraper.set_custom_selectors(
+                    company_selector=css_company,
+                    role_selector=css_role,
+                    desc_selector=css_desc,
+                )
+
+            # Validate URL matches source (for known sites)
             if source == "Indeed" and "indeed.com" not in url.lower():
                 st.warning("⚠️ URL doesn't look like an Indeed domain. Proceeding anyway...")
             elif source == "LinkedIn" and "linkedin.com" not in url.lower():
                 st.warning("⚠️ URL doesn't look like a LinkedIn domain. Proceeding anyway...")
             elif source == "Naukri" and "naukri.com" not in url.lower():
                 st.warning("⚠️ URL doesn't look like a Naukri domain. Proceeding anyway...")
+
+            # Generic mode info
+            if source == "Generic":
+                st.info(
+                    "🔄 **Generic Mode** — The scraper will try to automatically detect "
+                    "company names and job roles on this page using multiple strategies "
+                    "(JSON-LD, HTML tables, card patterns, text analysis).\n\n"
+                    "If results are incomplete, try adding **Custom CSS Selectors** "
+                    "in Advanced Options above."
+                )
 
             # Progress indicators
             progress_bar = st.progress(0, text="Initializing scraper...")
@@ -330,7 +405,6 @@ def main():
             all_jobs = []
 
             try:
-                # Scrape (with pagination support)
                 current_url = url
                 for page_num in range(max_pages):
                     status_placeholder.info(
@@ -341,48 +415,50 @@ def main():
                         text=f"Scraping page {page_num + 1}..."
                     )
 
+                    # Special handling for specific scrapers
                     if source == "LinkedIn":
                         result = scraper.scrape(current_url, use_playwright=use_playwright)
+                    elif source == "Generic":
+                        result = scraper.scrape(current_url)
                     else:
                         result = scraper.scrape(current_url)
 
                     if result.success:
                         all_jobs.extend(result.jobs)
-                        st.toast(f"✅ Found {result.total_new} jobs on page {page_num + 1}")
+                        st.toast(f"✅ Found {result.total_new} entries on page {page_num + 1}")
 
-                    # For multi-page support, try to find next page URL
-                    # (simplified - in production, you'd parse for "Next" links)
+                    # Pagination for known sites
                     if page_num + 1 < max_pages:
-                        # Add page parameter to URL
                         if "start=" in current_url:
                             current_url = re.sub(r'start=\d+', f'start={(page_num + 1) * 10}', current_url)
                         elif "page=" in current_url:
                             current_url = re.sub(r'page=\d+', f'page={page_num + 2}', current_url)
                         else:
-                            # Try appending page parameter
                             separator = "&" if "?" in current_url else "?"
-                            if source == "Indeed":
+                            if source in ("Indeed",):
                                 current_url = f"{current_url}{separator}start={10}"
                             else:
-                                break  # Can't paginate, stop here
+                                break
 
                 progress_bar.progress(100, text="Scraping complete!")
 
                 if not all_jobs:
                     status_placeholder.error(
-                        f"❌ No jobs found. The site may have blocked the scraper or "
-                        f"the page structure may have changed.\n\n"
-                        f"**Tips:**\n"
-                        f"- Try using a different job search URL\n"
-                        f"- For LinkedIn, make sure Playwright is installed "
-                        f"(run: `playwright install chromium`)\n"
-                        f"- Some sites require browser automation to bypass anti-bot protections"
+                        f"❌ No data found on this page.\n\n"
+                        f"**Possible reasons:**\n"
+                        f"- The site uses strong anti-bot protection (Cloudflare, Akamai)\n"
+                        f"- The page doesn't contain company/job listings\n"
+                        f"- The data is loaded dynamically via JavaScript\n\n"
+                        f"**Suggestions:**\n"
+                        f"- Try selecting a different source type\n"
+                        f"- Try with an Indeed job search URL instead\n"
+                        f"- Use Custom CSS Selectors in Advanced Options"
                     )
                     st.stop()
 
                 # ── Display Results ────────────────────────────────────
                 status_placeholder.success(
-                    f"✅ Successfully scraped **{len(all_jobs)}** job listings!"
+                    f"✅ Successfully scraped **{len(all_jobs)}** entries!"
                 )
 
                 # Stats row
@@ -394,7 +470,7 @@ def main():
                 sources = set(j.source for j in all_jobs)
 
                 stats_data = [
-                    ("📋 Total Jobs", len(all_jobs)),
+                    ("📋 Total Entries", len(all_jobs)),
                     ("🏢 Companies", len(companies)),
                     ("💼 Job Roles", len(roles)),
                     ("🌐 Sources", ", ".join(sources)),
@@ -412,7 +488,7 @@ def main():
 
                 # ── Preview Results ────────────────────────────────────
                 st.markdown("### 👁️ Preview Results")
-                st.markdown(f"Showing first 10 of {len(all_jobs)} jobs:")
+                st.markdown(f"Showing first 10 of {len(all_jobs)} entries:")
 
                 for job in all_jobs[:10]:
                     badge_class = f"badge-{job.source.lower()}"
@@ -427,7 +503,7 @@ def main():
                     )
 
                 if len(all_jobs) > 10:
-                    st.markdown(f"... and {len(all_jobs) - 10} more jobs")
+                    st.markdown(f"... and {len(all_jobs) - 10} more entries")
 
                 # ── Export to Excel ─────────────────────────────────────
                 st.markdown("### 📥 Export to Excel")
@@ -457,8 +533,8 @@ def main():
                     "**Possible fixes:**\n"
                     "- Check your internet connection\n"
                     "- Make sure the URL is correct and accessible\n"
-                    "- For LinkedIn, install Playwright browsers: run `playwright install`\n"
-                    "- The website may have blocked automated requests"
+                    "- The website may have blocked automated requests\n"
+                    "- Try using a different source type"
                 )
 
     # ── Tab 2: How to Use ──────────────────────────────────────────────
@@ -466,20 +542,23 @@ def main():
         st.markdown("## 📋 How to Use Job Scraper Pro")
 
         steps = [
-            ("1️⃣ Find Job Listings",
-             "Go to LinkedIn Jobs, Indeed, or Naukri.com and search for the "
-             "type of jobs you want. Copy the URL from your browser's address bar."),
+            ("1️⃣ Find a URL",
+             "Go to any job site, company directory, or page with listings. "
+             "Copy the URL from your browser's address bar."),
             ("2️⃣ Paste the URL",
-             "Paste the job search URL into the input field. The app will "
-             "auto-detect which site it's from."),
+             "Paste the URL into the input field. The app will auto-detect "
+             "the source type."),
             ("3️⃣ Select Source",
-             "Choose the correct job site. 'Auto-Detect' works for most URLs."),
-            ("4️⃣ Start Scraping",
-             "Click 'Start Scraping' and wait for the results. The app will "
-             "extract job titles, company names, and descriptions."),
-            ("5️⃣ Download Excel",
-             "Preview the results, then click 'Download Excel File' to save "
-             "everything to a formatted spreadsheet."),
+             "Choose the correct source. 'Auto-Detect' works for most URLs. "
+             "Use 'Generic' for any other website."),
+            ("4️⃣ Custom Selectors (Optional)",
+             "If auto-detection doesn't find anything, use 'Advanced Options' "
+             "to specify CSS selectors. Right-click an element → Inspect → "
+             "copy the CSS selector."),
+            ("5️⃣ Start Scraping",
+             "Click 'Start Scraping' and wait for results."),
+            ("6️⃣ Download Excel",
+             "Preview results, then click 'Download Excel File'."),
         ]
 
         for title, desc in steps:
@@ -494,12 +573,12 @@ def main():
         st.markdown("## 🎯 Features")
         features_cols = st.columns(3)
         features = [
-            ("🔍 Multi-Site", "Scrape from LinkedIn, Indeed, and Naukri.com"),
-            ("📄 Excel Export", "Well-formatted Excel with bullet points"),
-            ("🔄 Dedup", "Automatic duplicate detection"),
+            ("🔍 Multi-Site", "Scrape from LinkedIn, Indeed, Naukri & more"),
+            ("🔄 Generic Mode", "Scrape company info from ANY website"),
+            ("📄 Excel Export", "Formatted Excel with bullet points"),
+            ("🚫 Dedup", "Automatic duplicate detection"),
             ("⚡ Playwright", "Browser automation for JS-heavy sites"),
-            ("📊 Preview", "See results before downloading"),
-            ("🆓 Free & Open", "No API keys required"),
+            ("🎯 Custom Selectors", "Fine-tune extraction with CSS selectors"),
         ]
         for idx, (title, desc) in enumerate(features):
             with features_cols[idx % 3]:
@@ -511,18 +590,29 @@ def main():
                     unsafe_allow_html=True,
                 )
 
+        st.markdown("## 🎯 Tips for Generic Mode")
+        st.markdown("""
+        - **Company Directories** — Works well with sites listing company names
+        - **Job Boards** — Works with most job board search results
+        - **Tables** — Automatically detects data in HTML tables
+        - **If nothing is found** — Use Custom CSS Selectors:
+          1. Right-click a company name on the page → "Inspect"
+          2. Copy the CSS selector (e.g., `.company-name`)
+          3. Paste it in Advanced Options
+          4. Do the same for job role and description
+        """)
+
         st.markdown("## 🔧 Requirements")
         st.info(
-            "📌 **Playwright Browsers:** For LinkedIn scraping, you may need to install "
-            "Playwright browsers. Run this command in your terminal:\n\n"
+            "📌 **Playwright Browsers:** For best results, install Playwright:\n\n"
             "`playwright install chromium`\n\n"
-            "Without this, some features may be limited."
+            "Without Playwright, some JavaScript-heavy sites may not work."
         )
 
     # ── Footer ─────────────────────────────────────────────────────────
     st.markdown(
         '<div class="footer">'
-        'Job Scraper Pro • Built with ❤️ using Streamlit & Python<br>'
+        'Job Scraper Pro v2.0 • Built with ❤️ using Streamlit & Python<br>'
         'Please respect websites\' terms of service and robots.txt'
         '</div>',
         unsafe_allow_html=True,
