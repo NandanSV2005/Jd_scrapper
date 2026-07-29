@@ -107,9 +107,7 @@ The Excel file contains:
 
 Pull requests are welcome! Feel free to add support for more job sites or improve existing scrapers.
 
-## 📄 License
 
-This project is open source and available under the [MIT License](LICENSE).
 
 ---
 
