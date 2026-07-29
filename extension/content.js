@@ -126,6 +126,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         extractionLog: [`CRITICAL ERROR: ${err.message}`]
       });
     }
+  }  // Close the if block
   // Keep channel open for async response
   return true;
 });
