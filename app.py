@@ -19,12 +19,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from scrapers.base_scraper import BaseScraper
+from scrapers.base_scraper import BaseScraper, JobListing
 from scrapers.indeed_scraper import IndeedScraper
 from scrapers.linkedin_scraper import LinkedInScraper
-from scrapers.naukri_scraper import NaukriScraper
 from scrapers.generic_scraper import GenericScraper
 from utils.excel_writer import ExcelWriter
+from scrapling_scraper import NaukriScraper as ScraplingNaukriScraper
 
 
 # ─── Styling ────────────────────────────────────────────────────────────────
@@ -159,9 +159,8 @@ def get_scraper(source: str):
         return IndeedScraper()
     elif source == "LinkedIn":
         return LinkedInScraper()
-    elif source == "Naukri":
-        return NaukriScraper()
-    elif source in ("Generic", "Auto-Detect"):
+    elif source in ("Generic", "Auto-Detect", "Naukri"):
+        # Naukri uses Scrapling engine (handled separately in scrape flow)
         return GenericScraper()
     return None
 
@@ -183,7 +182,7 @@ def main():
                     unsafe_allow_html=True)
         st.markdown(
             '<div class="app-subtitle">'
-            'Scrape job listings from LinkedIn, Indeed, Naukri & any website — '
+            'Scrape job listings from LinkedIn, Indeed, Naukri (🦀 Scrapling anti-bot) & any website — '
             'export to Excel with bullet-pointed descriptions & deduplication'
             '</div>',
             unsafe_allow_html=True
@@ -192,7 +191,7 @@ def main():
     with col2:
         st.markdown(
             f'<div style="text-align:right;padding-top:0.8rem;color:#999;">'
-            f'<small>v2.0 • {datetime.now().strftime("%b %Y")}</small>'
+            f'<small>v3.0 • Scrapling Engine • {datetime.now().strftime("%b %Y")}</small>'
             f'</div>',
             unsafe_allow_html=True
         )
@@ -214,16 +213,15 @@ def main():
         st.markdown("### 📌 Sample URLs")
         st.markdown("""
         ```
+        Naukri (🦀 Scrapling):
+        https://www.naukri.com/ai-jobs
+
         Indeed:
         https://www.indeed.com/jobs?q=software+engineer
 
         LinkedIn:
         https://www.linkedin.com/jobs/search/
           ?keywords=software+engineer
-
-        Naukri:
-        https://www.naukri.com/
-          software-engineer-jobs
 
         Any Page (Generic):
         https://example.com/companies
@@ -405,42 +403,83 @@ def main():
             all_jobs = []
 
             try:
-                current_url = url
-                for page_num in range(max_pages):
+                # ── Naukri: Use Scrapling engine ────────────────────────
+                if source == "Naukri":
                     status_placeholder.info(
-                        f"🔄 Scraping page {page_num + 1} of {max_pages}..."
+                        "🦀 **Scrapling Engine Active** — Bypassing anti-bot & visiting each job page..."
                     )
-                    progress_bar.progress(
-                        (page_num) / max_pages,
-                        text=f"Scraping page {page_num + 1}..."
+                    progress_bar.progress(10, text="Initializing Scrapling (anti-bot bypass)...")
+
+                    serial_scraper = ScraplingNaukriScraper(
+                        headless=not use_playwright,
+                        verbose=False
                     )
 
-                    # Special handling for specific scrapers
-                    if source == "LinkedIn":
-                        result = scraper.scrape(current_url, use_playwright=use_playwright)
-                    elif source == "Generic":
-                        result = scraper.scrape(current_url)
+                    job_dicts = serial_scraper.scrape_listing(url, max_jobs=max_pages * 20)
+
+                    if job_dicts:
+                        seen = set()
+                        for jd in job_dicts:
+                            fp = f"{jd.get('company','')}|{jd.get('role','')}|{jd.get('description','')[:100]}"
+                            if fp not in seen:
+                                seen.add(fp)
+                                all_jobs.append(JobListing(
+                                    company=jd.get('company', ''),
+                                    job_role=jd.get('role', ''),
+                                    description=jd.get('description', ''),
+                                    description_bullets=jd.get('descriptionBullets', []),
+                                    source='Scrapling-Naukri',
+                                ))
+                        progress_bar.progress(100, text=f"Scraped {len(all_jobs)} jobs!")
+                        st.success(f"✅ Scrapling extracted **{len(all_jobs)}** jobs!")
                     else:
-                        result = scraper.scrape(current_url)
+                        progress_bar.empty()
+                        status_placeholder.error(
+                            "❌ Scrapling couldn't find any jobs on this page.\n\n"
+                            "**Possible reasons:**\n"
+                            "- The URL might not be a valid Naukri search results page\n"
+                            "- The site structure may have changed\n"
+                            "- Anti-bot protection may be blocking the request\n\n"
+                            "Try with a different Naukri search URL."
+                        )
+                        st.stop()
 
-                    if result.success:
-                        all_jobs.extend(result.jobs)
-                        st.toast(f"✅ Found {result.total_new} entries on page {page_num + 1}")
+                else:
+                    # ── Other sources: use old scrapers ─────────────────
+                    current_url = url
+                    for page_num in range(max_pages):
+                        status_placeholder.info(
+                            f"🔄 Scraping page {page_num + 1} of {max_pages}..."
+                        )
+                        progress_bar.progress(
+                            (page_num) / max_pages,
+                            text=f"Scraping page {page_num + 1}..."
+                        )
 
-                    # Pagination for known sites
-                    if page_num + 1 < max_pages:
-                        if "start=" in current_url:
-                            current_url = re.sub(r'start=\d+', f'start={(page_num + 1) * 10}', current_url)
-                        elif "page=" in current_url:
-                            current_url = re.sub(r'page=\d+', f'page={page_num + 2}', current_url)
+                        if source == "LinkedIn":
+                            result = scraper.scrape(current_url, use_playwright=use_playwright)
+                        elif source == "Generic":
+                            result = scraper.scrape(current_url)
                         else:
-                            separator = "&" if "?" in current_url else "?"
-                            if source in ("Indeed",):
-                                current_url = f"{current_url}{separator}start={10}"
-                            else:
-                                break
+                            result = scraper.scrape(current_url)
 
-                progress_bar.progress(100, text="Scraping complete!")
+                        if result.success:
+                            all_jobs.extend(result.jobs)
+                            st.toast(f"✅ Found {result.total_new} entries on page {page_num + 1}")
+
+                        if page_num + 1 < max_pages:
+                            if "start=" in current_url:
+                                current_url = re.sub(r'start=\d+', f'start={(page_num + 1) * 10}', current_url)
+                            elif "page=" in current_url:
+                                current_url = re.sub(r'page=\d+', f'page={page_num + 2}', current_url)
+                            else:
+                                sep = "&" if "?" in current_url else "?"
+                                if source == "Indeed":
+                                    current_url = f"{current_url}{sep}start={10}"
+                                else:
+                                    break
+
+                    progress_bar.progress(100, text="Scraping complete!")
 
                 if not all_jobs:
                     status_placeholder.error(
@@ -612,7 +651,7 @@ def main():
     # ── Footer ─────────────────────────────────────────────────────────
     st.markdown(
         '<div class="footer">'
-        'Job Scraper Pro v2.0 • Built with ❤️ using Streamlit & Python<br>'
+        'Job Scraper Pro v3.0 • 🦀 Scrapling Engine • Built with ❤️ using Streamlit & Python<br>'
         'Please respect websites\' terms of service and robots.txt'
         '</div>',
         unsafe_allow_html=True,
