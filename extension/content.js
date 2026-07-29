@@ -25,6 +25,16 @@ const EXCLUDE_WORDS = new Set([
   'sort', 'view', 'list', 'grid', 'back', 'more', 'less', 'all',
   'submit', 'reset', 'send', 'close', 'open', 'help', 'faq', 'features',
   'products', 'services', 'solutions', 'pricing', 'blog', 'contact us',
+  // Junk entries that get picked up from Naukri sidebar/footer widgets
+  'view all', 'register now', 'learn from leaders', 'interview experiences',
+  'must reads', 'career advice', 'most viewed reads', 'salary',
+  'explore', 'help center', 'invites', 'offers', 'fraud alert',
+  'trust & safety', 'search booster', 'posting', 'alert',
+  'recommended jobs', 'send me jobs', 'filter jobs',
+  'career management', 'career guidance', 'careerverse',
+  'help center', 'search booster', 'explore jobs',
+  'get real-time job updates', 'resume tips',
+  'interview advice', 'how to use', 'recommended for you',
 ]);
 
 // Site-specific selectors for individual job posting pages
@@ -299,7 +309,28 @@ function scrapePage(options = {}) {
     logger(`✓ TOTAL: ${items.length} entries`);
   }
 
-  return buildResult(items, log, pageType, logger);
+  // ── Build result and check for job links on known job sites ───────
+  const resultData = buildResult(items, log, pageType, logger);
+
+  // CRITICAL: On known job sites, if page wasn't detected as job/listing,
+  // try extracting job links anyway. This prevents the generic extraction
+  // strategies from polluting output with sidebar widgets, footer links, etc.
+  // NOTE: pageType.type !== 'listing' guard avoids double-calling extractJobLinks()
+  // (it's already called inside buildResult() for 'listing' pages)
+  if (pageType.site && resultData.pageType !== 'listing-with-links' && pageType.type !== 'job' && pageType.type !== 'listing') {
+    logger(`Checking for job links on "${pageType.site}" (type: ${pageType.type})...`);
+    const links = extractJobLinks();
+    if (links.length > 0) {
+      resultData.jobLinks = links;
+      resultData.jobLinksCount = links.length;
+      resultData.pageType = 'listing-with-links';
+      resultData.data = [];
+      resultData.count = 0;
+      logger(`✓ Found ${links.length} job links! Switched to batch mode. Cleared ${items.length} generic entries.`);
+    }
+  }
+
+  return resultData;
 }
 
 // ─── Build result object ────────────────────────────────────────────────────
@@ -359,16 +390,18 @@ function detectPageType(hostname, logger) {
       { label: 'search header', check: !!document.querySelector('[data-testid*="search"], [class*="search-header"], .jobsearch-ResultsList, [class*="search-result"], [class*="srp-"]') },
     ];
 
-    // Naukri-specific listing detection (more relaxed)
+    // Naukri-specific listing detection (more aggressive — catches changing DOM)
     if (hostname.includes('naukri.com')) {
       const naukriListingSignals = [
-        document.querySelectorAll('div[class*="jobTuple"], .job-tuple').length >= 2,
+        document.querySelectorAll('div[class*="jobTuple"], .job-tuple, [class*="job-card"], [class*="srp-job"]').length >= 2,
         document.querySelectorAll('a[href*="/job-listings"]').length >= 2,
-        document.querySelectorAll('a[href*="/ai-jobs"], a[href*="-jobs"]').length >= 3,
-        !!document.querySelector('[class*="search-result"], [class*="srp"]'),
+        document.querySelectorAll('a[href*="-jobs"]').length >= 5,
+        !!document.querySelector('[class*="search-result"], [class*="srp"], [class*="search"]'),
+        document.querySelectorAll('[class*="pagination"], [aria-label*="pagination"]').length > 0,
+        document.querySelectorAll('a[href*="job-listings"], a[href*="job-details"]').length >= 2,
       ].filter(Boolean).length;
       if (naukriListingSignals >= 2) {
-        return { type: 'listing', site, reason: `Naukri listing page: ${naukriListingSignals}/4 signals` };
+        return { type: 'listing', site, reason: `Naukri listing: ${naukriListingSignals}/6 signals` };
       }
     }
 
