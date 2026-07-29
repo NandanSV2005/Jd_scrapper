@@ -1,22 +1,23 @@
 /**
- * Job Scraper Pro - Chrome Extension Popup Logic v2.0
- * Handles user interaction, scraping, Excel generation, warnings & logs
+ * Job Scraper Pro - Chrome Extension Popup v3.0
+ * Handles user interaction, single page scraping, batch mode with progress
  */
 
 // State
 let scrapedData = [];
 let extractionLog = [];
+let jobLinks = [];
 
-// DOM elements
+// DOM elements - General
 const pageUrl = document.getElementById('pageUrl');
 const pageTypeTag = document.getElementById('pageTypeTag');
-const warningBanner = document.getElementById('warningBanner');
-const warningText = document.getElementById('warningText');
 const scrapeBtn = document.getElementById('scrapeBtn');
 const statusArea = document.getElementById('statusArea');
 const resultsArea = document.getElementById('resultsArea');
 const resultCount = document.getElementById('resultCount');
 const downloadBtn = document.getElementById('downloadBtn');
+
+// DOM elements - Options
 const dedupCheck = document.getElementById('dedupCheck');
 const deepMode = document.getElementById('deepMode');
 const autoDownload = document.getElementById('autoDownload');
@@ -25,12 +26,32 @@ const selectorOptions = document.getElementById('selectorOptions');
 const cssCompany = document.getElementById('cssCompany');
 const cssRole = document.getElementById('cssRole');
 const cssDesc = document.getElementById('cssDesc');
+
+// DOM elements - Warning
+const warningBanner = document.getElementById('warningBanner');
+const warningText = document.getElementById('warningText');
+
+// DOM elements - Batch
+const batchSection = document.getElementById('batchSection');
+const batchFoundCount = document.getElementById('batchFoundCount');
+const batchStartBtn = document.getElementById('batchStartBtn');
+const batchProgress = document.getElementById('batchProgress');
+const batchProgressText = document.getElementById('batchProgressText');
+const batchProgressBar = document.getElementById('batchProgressBar');
+const batchProgressCount = document.getElementById('batchProgressCount');
+const batchProgressStatus = document.getElementById('batchProgressStatus');
+const batchCancelBtn = document.getElementById('batchCancelBtn');
+
+// DOM elements - Log
 const logViewer = document.getElementById('logViewer');
 const logToggle = document.getElementById('logToggle');
 const logContent = document.getElementById('logContent');
 
-// ─── Initialize ──────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// INITIALIZE
+// ═══════════════════════════════════════════════════════════════════════════
 
+// Get current tab URL
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const tab = tabs[0];
   if (tab && tab.url) {
@@ -43,56 +64,103 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   }
 });
 
-// ─── Status helpers ──────────────────────────────────────────────────────
+// Check if batch is already running from a previous popup session
+chrome.runtime.sendMessage({ action: 'get-batch-status' }, (status) => {
+  if (status && status.isRunning) {
+    showBatchProgress({
+      current: status.currentIndex + 1,
+      total: status.totalCount,
+    });
+    hideAllSections();
+    batchProgress.style.display = 'block';
+  }
+});
+
+// Listen for messages from background.js (batch progress updates)
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.action === 'batch-started') {
+    showBatchProgress({ current: 0, total: message.total });
+    batchProgressText.textContent = 'Starting batch scrape...';
+  } else if (message.action === 'batch-progress') {
+    batchProgressText.textContent = `Scraping: ${message.company || 'Job'} — ${(message.role || message.url || '').substring(0, 50)}`;
+    showBatchProgress({ current: message.current, total: message.total });
+  } else if (message.action === 'batch-complete') {
+    batchProgressStatus.textContent = '✓ Complete!';
+    batchProgressBar.style.width = '100%';
+    batchProgressCount.textContent = `${message.totalUrls} / ${message.totalUrls}`;
+    batchProgressText.textContent = `Finished! Got ${message.resultsCount} entries.`;
+    batchCancelBtn.style.display = 'none';
+
+    // Show results
+    const allResults = message.results || [];
+    if (allResults.length > 0) {
+      scrapedData = allResults;
+      resultCount.textContent = allResults.length;
+      resultsArea.style.display = 'block';
+      showLog(allResults.slice(0, 5).map(r => `✓ ${r.company || '?'} — ${(r.role || '').substring(0, 60)}`));
+      setPageTypeTag('job');
+
+      showStatus(
+        `✅ Batch complete: ${allResults.length} entries extracted`,
+        'success',
+        `${message.processedUrls} pages scraped, ${message.errorsCount} errors`
+      );
+
+      if (autoDownload.checked) {
+        try {
+          generateExcel(allResults);
+        } catch (e) { /* download button is still available */ }
+      }
+    } else {
+      showStatus(
+        'No data extracted from any job page',
+        'error',
+        `Tried ${message.processedUrls} pages. Check the extraction log.`
+      );
+    }
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UI HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function hideAllSections() {
+  hideStatus();
+  hideWarning();
+  hideLog();
+  resultsArea.style.display = 'none';
+  batchSection.style.display = 'none';
+  batchProgress.style.display = 'none';
+}
 
 function showStatus(message, type = 'loading', details = '') {
   statusArea.className = `status ${type}`;
-
   let html = '';
-  if (type === 'loading') {
-    html = `<span class="spinner"></span> ${message}`;
-  } else if (type === 'success') {
-    html = `✅ ${message}`;
-  } else if (type === 'error') {
-    html = `❌ ${message}`;
-    if (details) {
-      html += `<br><small style="color:#666;">${details}</small>`;
-    }
-  } else if (type === 'warning') {
-    html = `⚠️ ${message}`;
-    if (details) {
-      html += `<br><small style="color:#666;">${details}</small>`;
-    }
-  }
+  if (type === 'loading') html = `<span class="spinner"></span> ${message}`;
+  else if (type === 'success') html = `✅ ${message}`;
+  else if (type === 'error') html = `❌ ${message}`;
+  else if (type === 'warning') html = `⚠️ ${message}`;
+  if (details) html += `<br><small style="color:#666;">${details}</small>`;
   statusArea.innerHTML = html;
   statusArea.style.display = 'block';
 }
 
-function hideStatus() {
-  statusArea.style.display = 'none';
-}
-
-// ─── Page type tag ───────────────────────────────────────────────────────
+function hideStatus() { statusArea.style.display = 'none'; }
 
 function setPageTypeTag(type) {
   pageTypeTag.style.display = 'inline-block';
   pageTypeTag.className = `page-type-tag ${type}`;
-  const labels = { job: '📄 Job Page', listing: '📋 Listing Page', unknown: '❓ Unknown' };
+  const labels = { job: '📄 Job Page', 'listing-with-links': '📋 Listing (Batch Ready)', listing: '📋 Listing Page', unknown: '❓ Unknown' };
   pageTypeTag.textContent = labels[type] || type;
 }
-
-// ─── Warning banner ──────────────────────────────────────────────────────
 
 function showWarning(message) {
   warningText.textContent = message;
   warningBanner.classList.add('show');
 }
 
-function hideWarning() {
-  warningBanner.classList.remove('show');
-}
-
-// ─── Log viewer ──────────────────────────────────────────────────────────
+function hideWarning() { warningBanner.classList.remove('show'); }
 
 function showLog(log) {
   extractionLog = log || [];
@@ -108,12 +176,37 @@ function hideLog() {
 logToggle.addEventListener('click', () => {
   const isVisible = logContent.classList.contains('show');
   logContent.classList.toggle('show');
-  logToggle.textContent = isVisible
-    ? '📋 Show extraction log'
-    : '📋 Hide extraction log';
+  logToggle.textContent = isVisible ? '📋 Show extraction log' : '📋 Hide extraction log';
 });
 
-// ─── Generate Excel ──────────────────────────────────────────────────────
+// ── Batch UI ────────────────────────────────────────────────────────────
+
+function showBatchLinks(count) {
+  batchFoundCount.textContent = count;
+  batchSection.style.display = 'block';
+  batchProgress.style.display = 'none';
+}
+
+function showBatchProgress(data) {
+  const current = data.current || 0;
+  const total = data.total || 1;
+  const pct = Math.min(100, Math.round((current / total) * 100));
+  batchProgressBar.style.width = `${pct}%`;
+  batchProgressCount.textContent = `${current} / ${total}`;
+  batchProgressStatus.textContent = current >= total ? '✓ Complete!' : `⏳ ${pct}%`;
+  batchSection.style.display = 'none';
+  batchProgress.style.display = 'block';
+  batchCancelBtn.style.display = (current < total) ? 'block' : 'none';
+}
+
+function hideBatchUI() {
+  batchSection.style.display = 'none';
+  batchProgress.style.display = 'none';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXCEL GENERATION
+// ═══════════════════════════════════════════════════════════════════════════
 
 function generateExcel(data) {
   if (!data || data.length === 0) {
@@ -137,7 +230,6 @@ function generateExcel(data) {
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(rows);
-
   ws['!cols'] = [
     { wch: 6 },   // S.No
     { wch: 30 },  // Company
@@ -145,28 +237,24 @@ function generateExcel(data) {
     { wch: 80 },  // Description
     { wch: 15 },  // Source
   ];
-
   XLSX.utils.book_append_sheet(wb, ws, 'Job Listings');
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
   const filename = `jobs_scraped_${timestamp}.xlsx`;
   XLSX.writeFile(wb, filename);
-
   return filename;
 }
 
-// ─── Scrape the page ─────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// SCRAPE THIS PAGE
+// ═══════════════════════════════════════════════════════════════════════════
 
 async function scrapePage() {
-  hideStatus();
-  hideWarning();
-  hideLog();
-  resultsArea.style.display = 'none';
+  hideAllSections();
   scrapedData = [];
+  jobLinks = [];
 
   try {
-    showStatus('Analyzing page content...', 'loading');
-
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || !tab.id) {
       showStatus('Could not access this page', 'error');
@@ -174,11 +262,8 @@ async function scrapePage() {
     }
 
     if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://')) {
-      showStatus(
-        'Cannot scrape browser internal pages',
-        'error',
-        'Try navigating to a job site first (e.g., naukri.com, indeed.com)'
-      );
+      showStatus('Cannot scrape browser internal pages', 'error',
+        'Try navigating to a job site first (e.g., naukri.com, indeed.com)');
       return;
     }
 
@@ -198,101 +283,110 @@ async function scrapePage() {
     });
 
     if (!result || result.error) {
-      showStatus(
-        'Scraping failed',
-        'error',
-        (result && result.error) || 'Could not communicate with the page. Try reloading the page.'
-      );
+      showStatus('Scraping failed', 'error',
+        (result && result.error) || 'Could not communicate with the page. Try reloading.');
       return;
     }
 
-    // Show page type tag
-    if (result.pageType) {
-      setPageTypeTag(result.pageType);
+    // Show page type
+    if (result.pageType) setPageTypeTag(result.pageType);
+
+    // Show extraction log
+    if (result.extractionLog && result.extractionLog.length > 0) showLog(result.extractionLog);
+
+    // ── LISTING PAGE WITH JOB LINKS → Show Batch Option ──────────────
+    if (result.pageType === 'listing-with-links' && result.jobLinks && result.jobLinks.length > 0) {
+      jobLinks = result.jobLinks;
+      showStatus(`Found ${result.jobLinks.length} job listing(s) on this page`, 'success',
+        'Click "Batch Scrape All Jobs" to auto-crawl each one for full details.');
+      showBatchLinks(result.jobLinks.length);
+      return;
     }
 
-    // Show extraction log (always available)
-    if (result.extractionLog && result.extractionLog.length > 0) {
-      showLog(result.extractionLog);
+    // ── LISTING PAGE WITHOUT LINKS → Show Warning ────────────────────
+    if (result.pageType === 'listing' && (!result.jobLinks || result.jobLinks.length === 0)) {
+      showStatus('No job listings found on this page', 'error',
+        'Could not find recognizable job cards. Try a different search results page.');
+      showWarning('No job listing links could be extracted from this page. ' +
+        'This may be a different type of page.');
+      return;
     }
 
-    // Show warning if listing page
-    if (result.warning) {
-      showWarning(result.warning);
-    }
-
+    // ── INDIVIDUAL JOB PAGE → Show Results Normally ─────────────────
     scrapedData = result.data || [];
 
     if (scrapedData.length === 0) {
-      showStatus(
-        'No company/job data found',
-        'error',
-        !result.warning
-          ? 'This page may not contain company or job listings.'
-          : 'This appears to be a listing page. Try opening an individual job posting.'
-      );
+      showStatus('No data found', 'error',
+        'Try navigating to a job page or search results page.');
       return;
     }
 
-    // Show results
     resultCount.textContent = scrapedData.length;
     resultsArea.style.display = 'block';
 
-    // Check if data has placeholders
     const hasPlaceholders = scrapedData.some(
       d => (d.company || '').startsWith('[COMPANY_') || (d.role || '').startsWith('[ROLE_')
     );
 
-    if (hasPlaceholders) {
-      showStatus(
-        `Found ${scrapedData.length} entries (with some missing data)`,
-        'warning',
-        'Some fields could not be extracted. Check the extraction log for details.'
-      );
-    } else {
-      showStatus(
-        `Found ${scrapedData.length} entries!`,
-        'success'
-      );
-    }
+    showStatus(
+      `Found ${scrapedData.length} entries`,
+      hasPlaceholders ? 'warning' : 'success',
+      hasPlaceholders ? 'Some fields could not be extracted. Check the log.' : ''
+    );
 
-    // Auto-download if enabled
     if (autoDownload.checked && scrapedData.length > 0) {
-      try {
-        const filename = generateExcel(scrapedData);
-        showStatus(
-          `Downloaded ${scrapedData.length} entries to Excel`,
-          'success',
-          `File: ${filename}`
-        );
-      } catch (err) {
-        showStatus(
-          'Data extracted! Click "Download Excel" to save.',
-          hasPlaceholders ? 'warning' : 'success'
-        );
-      }
+      try { generateExcel(scrapedData); } catch (e) {}
     }
 
   } catch (err) {
     console.error('Scrape error:', err);
-    if (err.message && err.message.includes('Could not establish connection')) {
-      showStatus(
-        'Page not ready',
-        'error',
-        'Try reloading the page, then click the extension again.'
-      );
-    } else {
-      showStatus(
-        'Scraping failed',
-        'error',
-        err.message || 'An unexpected error occurred'
-      );
-    }
+    showStatus('Scraping failed', 'error',
+      err.message?.includes('Could not establish connection')
+        ? 'Try reloading the page, then click the extension again.'
+        : err.message || 'An unexpected error occurred');
   }
 }
 
-// ─── Download button ─────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// BATCH SCRAPE HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════
 
+async function startBatchScrape() {
+  if (jobLinks.length === 0) {
+    showStatus('No job links to process', 'error');
+    return;
+  }
+
+  showBatchProgress({ current: 0, total: jobLinks.length });
+  batchProgressText.textContent = 'Starting batch scrape...';
+  batchCancelBtn.style.display = 'block';
+
+  chrome.runtime.sendMessage({
+    action: 'start-batch-scrape',
+    urls: jobLinks,
+  }, (response) => {
+    if (response && response.error) {
+      showStatus(response.error, 'error');
+      hideBatchUI();
+    }
+  });
+}
+
+function cancelBatchScrape() {
+  chrome.runtime.sendMessage({ action: 'cancel-batch-scrape' });
+  batchProgressText.textContent = '⏹ Cancelling...';
+  batchCancelBtn.disabled = true;
+  batchCancelBtn.textContent = '⏹ Cancelling...';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EVENT LISTENERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Scrape button
+scrapeBtn.addEventListener('click', scrapePage);
+
+// Download button
 downloadBtn.addEventListener('click', async () => {
   if (scrapedData.length === 0) {
     showStatus('No data to download', 'error');
@@ -300,23 +394,18 @@ downloadBtn.addEventListener('click', async () => {
   }
   try {
     showStatus('Generating Excel file...', 'loading');
-    const filename = generateExcel(scrapedData);
-    showStatus(
-      `Downloaded ${scrapedData.length} entries!`,
-      'success',
-      `File: ${filename}`
-    );
+    generateExcel(scrapedData);
+    showStatus(`Downloaded ${scrapedData.length} entries!`, 'success');
   } catch (err) {
-    showStatus(
-      'Failed to generate Excel',
-      'error',
-      err.message
-    );
+    showStatus('Failed to generate Excel', 'error', err.message);
   }
 });
 
-// ─── Toggle CSS selectors ────────────────────────────────────────────────
+// Batch buttons
+batchStartBtn.addEventListener('click', startBatchScrape);
+batchCancelBtn.addEventListener('click', cancelBatchScrape);
 
+// CSS selector toggle
 toggleSelectors.addEventListener('click', () => {
   const isVisible = selectorOptions.style.display !== 'none';
   selectorOptions.style.display = isVisible ? 'none' : 'block';
@@ -324,7 +413,3 @@ toggleSelectors.addEventListener('click', () => {
     ? '🎯 Show Custom CSS Selectors'
     : '🎯 Hide Custom CSS Selectors';
 });
-
-// ─── Scrape button ───────────────────────────────────────────────────────
-
-scrapeBtn.addEventListener('click', scrapePage);

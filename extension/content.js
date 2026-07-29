@@ -126,8 +126,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         extractionLog: [`CRITICAL ERROR: ${err.message}`]
       });
     }
-  }
-  // Keep channel open for async response (though we're sync here)
+  // Keep channel open for async response
   return true;
 });
 
@@ -254,15 +253,20 @@ function buildResult(items, log, pageType) {
     extractionLog: log,
   };
 
-  // If it's a listing page, add a clear warning
+  // If it's a listing page, ALSO extract job links for batch scraping
   if (pageType.type === 'listing') {
-    result.warning =
-      '⚠️ This page appears to be a search results / listing page, ' +
-      'not an individual job posting.\n\n' +
-      'For accurate results with company names and full descriptions:\n' +
-      '1. Click on any job title to open the individual job page\n' +
-      '2. Then click "Scrape This Page" again\n\n' +
-      'Tip: Individual job pages have the full description and company name visible.';
+    // Extract job links from the listing cards
+    const links = extractJobLinks();
+    result.jobLinks = links;
+    result.jobLinksCount = links.length;
+
+    logger(`Extracted ${links.length} job link(s) from listing page for batch processing`);
+
+    // No warning anymore — listing pages are the primary workflow now!
+    // We'll handle batch scraping in the popup
+    if (links.length > 0) {
+      result.pageType = 'listing-with-links';
+    }
   }
 
   return result;
@@ -857,6 +861,73 @@ function extractFromTextPatterns(seen, logger) {
 
   logger(`  Found ${count} unique company name(s) via text patterns`);
   return items;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// BULK MODE: Extract Job Links from Listing Page
+// ═════════════════════════════════════════════════════════════════════════════
+
+function extractJobLinks() {
+  const links = [];
+  const hostname = window.location.hostname;
+  const seenUrls = new Set();
+
+  function addLink(url, company, role) {
+    if (!url || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    // Ensure absolute URL
+    if (url.startsWith('/')) {
+      url = window.location.origin + url;
+    }
+    links.push({ url: url, company: company || '', role: role || '' });
+  }
+
+  if (hostname.includes('indeed.com')) {
+    // Indeed: each job card has a link with data-jk or href containing jk=
+    document.querySelectorAll('.job_seen_beacon, .jobsearch-SerpJobCard, [data-testid="job-card"]').forEach(card => {
+      const linkEl = card.querySelector('a[data-jk], a[id^="job_"]');
+      const href = card.querySelector('a[href*="jk="]');
+      const url = linkEl ? linkEl.href : (href ? href.href : '');
+      const company = (card.querySelector('[data-testid="company-name"], .companyName, .css-1ioi40n, .css-1rrizms') || {}).textContent || '';
+      const role = (card.querySelector('a[data-jk] span, .jobTitle, [id^="job_"] span, h2 span') || {}).textContent || '';
+      if (url) addLink(url, company.trim(), role.trim());
+    });
+  } else if (hostname.includes('linkedin.com')) {
+    // LinkedIn: base cards
+    document.querySelectorAll('.base-card, .job-card-container, .job-search-card').forEach(card => {
+      const linkEl = card.querySelector('.base-card__full-link, .job-card-container__link, a[href*="/jobs/view/"]');
+      const url = linkEl ? linkEl.href : '';
+      const company = (card.querySelector('.base-card__subtitle, .job-card-container__company-name, .artdeco-entity-lockup__caption, [class*="company"]') || {}).textContent || '';
+      const role = (card.querySelector('.base-card__title, .job-card-container__link, .job-search-card__title, [class*="title"]') || {}).textContent || '';
+      if (url) addLink(url, company.trim(), role.trim());
+    });
+  } else if (hostname.includes('naukri.com')) {
+    // Naukri: job cards
+    document.querySelectorAll('.job-card-container, .job-list-card, article, li[class*="job"]').forEach(card => {
+      const linkEl = card.querySelector('a[href*="/job-listings"], a[href*="job-details"], a.title, a[class*="title"]');
+      const url = linkEl ? linkEl.href : '';
+      const company = (card.querySelector('.company-name, .comp-name, .subTitle, [class*="company"]') || {}).textContent || '';
+      const role = (card.querySelector('.title, a.title, [class*="title"] a') || {}).textContent || (linkEl ? linkEl.textContent : '');
+      if (url) addLink(url, company.trim(), role.trim());
+    });
+  } else {
+    // Generic: look for job-like links inside card-like containers
+    const cardSelectors = ['article', 'li[class*="job"]', 'div[class*="job-card"]', 'div[class*="result"]', 'div[class*="listing"]'];
+    for (const sel of cardSelectors) {
+      const cards = document.querySelectorAll(sel);
+      for (const card of cards) {
+        const a = card.querySelector('a[href]');
+        if (a && (/job|career|position|vacancy/i.test(a.href) || /job|career|position|vacancy/i.test(a.textContent))) {
+          const company = (card.querySelector('[class*="company"], [class*="org"]') || {}).textContent || '';
+          const role = a.textContent || '';
+          addLink(a.href, company.trim(), role.trim());
+        }
+      }
+      if (links.length > 0) break;
+    }
+  }
+
+  return links;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
