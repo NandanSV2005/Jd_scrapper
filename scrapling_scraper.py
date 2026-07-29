@@ -1,20 +1,19 @@
 """
-Job Scraper Pro — Scrapling Engine (v2.0)
+Job Scraper Pro — Scrapling Engine (v4.0)
 ==========================================
-A production-ready job scraper powered by Scrapling that:
-- Bypasses anti-bot protection (Cloudflare, Akamai) via DynamicFetcher/StealthyFetcher
-- Renders JavaScript-heavy pages 
-- Extracts job listings + full individual job details
-- Saves to styled Excel
+Extracts job data from Naukri listing page cards using DynamicFetcher + BeautifulSoup.
+No individual job page visits needed — Naukri blocks those server-side.
+
+All data is parsed directly from the listing page's card elements:
+  <div class="cust-job-tuple layout-wrapper lay-2 sjw__tuple">
+    - Job title (a[href*=job-listings])
+    - Company name (a[href*=-jobs-careers-])
+    - Experience, Location
+    - Description snippet
+    - Skills/tags
+    - etc.
 
 Usage:
-    from scrapling_scraper import NaukriScraper
-    
-    scraper = NaukriScraper()
-    jobs = scraper.scrape_listing("https://www.naukri.com/ai-jobs")
-    scraper.export_excel(jobs, "output.xlsx")
-    
-    # CLI:
     python scrapling_scraper.py "https://www.naukri.com/ai-jobs" -o results.xlsx
 """
 
@@ -23,6 +22,8 @@ import sys
 import time
 import argparse
 from typing import Optional
+
+from bs4 import BeautifulSoup
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
@@ -42,29 +43,12 @@ def extract_bullets(text: str) -> list:
     return result
 
 
-def score_job_url(url: str) -> int:
-    """Score URL as individual job posting (3+ = high confidence, 0 = not a job)."""
-    try:
-        from urllib.parse import urlparse
-        path = urlparse(url).path
-    except Exception:
-        return 0
-    score = 0
-    if re.search(r'/(?:jobs|search|companies?|recruiters?|skills|location|salary)', path, re.I):
-        if len(path.split('/')) <= 3 and not re.search(r'\d{5,}', path):
-            return 0
-        score = 1
-    if re.search(r'/[a-zA-Z-]+-\d{5,}', path): score += 2
-    if re.search(r'/\d{6,}', path): score += 3
-    if re.search(r'\d{6,}', path): score += 1
-    if '/job-listings' in path.lower(): score += 2
-    if '/job-details' in path.lower(): score += 3
-    if 'viewjob' in path.lower() or '?jk=' in url: score += 3
-    if re.search(r'/jobs/view/', path, re.I): score += 3
-    if re.search(r'/jobs/\d+/', path): score += 3
-    if re.search(r'reviews?|rating|interview|salary|benefit|contact', path, re.I): return 0
-    if len([p for p in path.split('/') if p]) <= 1: return 0
-    return score
+def clean_text(text: str) -> str:
+    """Clean and normalize text."""
+    if not text:
+        return ''
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 # ─── Excel Export ───────────────────────────────────────────────────────
@@ -99,12 +83,11 @@ def export_excel(jobs: list, filename: str = "jd_scraper_output.xlsx") -> str:
 
     headers = [
         'S.No', 'Company Name', 'Job Role',
-        'Job Description (Bullet Points)', 'Key Skills',
-        'Location', 'Experience', 'Education',
-        'Employment Type', 'Department', 'Industry',
-        'Job Highlights', 'Source'
+        'Job Description', 'Key Skills',
+        'Location', 'Experience',
+        'Source'
     ]
-    col_widths = [6, 28, 35, 80, 35, 20, 15, 25, 18, 25, 25, 50, 15]
+    col_widths = [6, 28, 35, 70, 40, 22, 15, 18]
 
     for col_idx, (header, width) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=1, column=col_idx, value=header)
@@ -127,11 +110,6 @@ def export_excel(jobs: list, filename: str = "jd_scraper_output.xlsx") -> str:
             skills_str,
             job.get('location', ''),
             job.get('experience', ''),
-            job.get('education', ''),
-            job.get('employmentType', ''),
-            job.get('department', ''),
-            job.get('industry', ''),
-            job.get('highlights', ''),
             job.get('source', 'Scrapling'),
         ]
         for col_idx, value in enumerate(row_data, 1):
@@ -154,17 +132,19 @@ def export_excel(jobs: list, filename: str = "jd_scraper_output.xlsx") -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# NAUKRI SCRAPER
+# NAUKRI SCRAPER — v4.0 (Card-based, no individual page visits)
 # ═════════════════════════════════════════════════════════════════════════
 
 class NaukriScraper:
     """
-    Scrape Naukri.com jobs using Scrapling with full anti-bot bypass.
+    Scrape Naukri.com jobs by parsing listing page cards with DynamicFetcher + BS4.
     
-    Example:
-        scraper = NaukriScraper()
-        jobs = scraper.scrape_listing("https://www.naukri.com/ai-jobs")
-        scraper.export_excel(jobs, "output.xlsx")
+    Naukri blocks individual job page access (301 redirects). So this scraper
+    extracts ALL available data from the listing page cards:
+      <div class="cust-job-tuple layout-wrapper lay-2 sjw__tuple">
+    
+    Each card contains: job title, company name, experience, location,
+    description snippet, and skills/tags.
     """
 
     def __init__(self, headless: bool = True, verbose: bool = True):
@@ -177,252 +157,244 @@ class NaukriScraper:
             print(msg)
         self._logs.append(msg)
 
-    # ── Scrapling API helpers ─────────────────────────────────────────
-    # Scrapling Selector API:
-    #   - el.text       → text content of element (string)
-    #   - el.attrib     → dict of attributes
-    #   - el.html_content → raw HTML string
-    #   - el.css('::text').get()    → first text match
-    #   - el.css('::text').getall() → all text matches as list
+    # ── Page Fetching ─────────────────────────────────────────────
 
-    def _sel_text(self, el) -> str:
-        """Extract text from a Scrapling Selector element."""
-        if el is None:
-            return ''
-        try:
-            t = el.text
-            return (t or '').strip()
-        except Exception:
-            return ''
-
-    def _fetch_page(self, url: str):
-        """Fetch a page using Scrapling's DynamicFetcher."""
+    def _fetch_listing(self, url: str) -> str:
+        """Fetch listing page HTML using DynamicFetcher (JS rendering)."""
         try:
             from scrapling.fetchers import DynamicFetcher
+            self.log("  Using DynamicFetcher (stealth browser)...")
             page = DynamicFetcher.fetch(url, headless=self.headless, network_idle=True)
-            return page
+            if not page:
+                return ''
+            html = page.html_content
+            if not html or len(html) < 1000:
+                # Try .text as fallback
+                html = page.text or ''
+            self.log(f"  [OK] Page loaded: {len(html)} chars")
+            return html
         except ImportError:
+            self.log("[ERROR] Scrapling not installed! Run: pip install scrapling")
+            return ''
+        except Exception as e:
+            self.log(f"[ERROR] Failed to fetch: {e}")
+            return ''
+
+    # ── Card Extraction ──────────────────────────────────────────
+
+    def extract_cards(self, html: str) -> list:
+        """
+        Parse job cards from listing page HTML using BeautifulSoup.
+        Returns list of dicts with job data.
+        """
+        soup = BeautifulSoup(html, 'lxml')
+
+        # Find all job card containers
+        cards = soup.select('div.cust-job-tuple, div[class*="cust-job-tuple"], div.sjw__tuple')
+        if not cards:
+            self.log("[!] No job cards found via CSS selectors")
+            return []
+
+        self.log(f"  [OK] Found {len(cards)} job cards")
+
+        jobs = []
+        for card in cards:
             try:
-                from scrapling.fetchers import StealthyFetcher
-                StealthyFetcher.adaptive = True
-                page = StealthyFetcher.fetch(url, headless=self.headless, network_idle=True)
-                return page
-            except ImportError:
-                self.log("[ERROR] Scrapling not installed! Run: pip install scrapling")
-                return None
-
-    def _check_captcha(self, page) -> bool:
-        """Detect if page has anti-bot challenge."""
-        body = (page.text or '').lower()
-        return any(w in body for w in ['captcha', 'verify you are human', 'just a moment'])
-
-    def _extract_text(self, page, selectors: list) -> str:
-        """Extract text from first matching CSS selector."""
-        for sel in selectors:
-            els = page.css(sel)
-            if els:
-                t = self._sel_text(els[0])
-                if t:
-                    return t
-        return ''
-
-    def _extract_all_texts(self, page, selectors: list) -> list:
-        """Extract text from ALL matching elements."""
-        for sel in selectors:
-            els = page.css(sel)
-            if els:
-                results = []
-                seen = set()
-                for el in els:
-                    t = self._sel_text(el)
-                    if t and t not in seen:
-                        seen.add(t)
-                        results.append(t)
-                if results:
-                    return results
-        return []
-
-    # ── Job Link Extraction ──────────────────────────────────────────
-
-    def extract_job_links(self, page) -> list:
-        """Extract all individual job URLs from a Naukri listing page."""
-        links = []
-        seen_urls = set()
-        self.log("  Scanning for job links...")
-
-        # ── Primary: Direct job link detection ────────────────
-        # Naukri job URLs follow: /job-listings-{slug}-{id}
-        job_link_els = page.css('a[href*="job-listings"]')
-        if job_link_els:
-            self.log(f"  [OK] Found {len(job_link_els)} direct job links")
-            for link in job_link_els:
-                try:
-                    href = link.attrib.get('href', '')
-                    if not href:
-                        continue
-                    if href.startswith('/'):
-                        href = 'https://www.naukri.com' + href
-                    if href in seen_urls:
-                        continue
-                    seen_urls.add(href)
-                    title = (self._sel_text(link) or '').strip()
-                    if len(title) < 2:
-                        continue
-                    links.append({'url': href, 'company': '', 'title': title[:120]})
-                except Exception:
-                    continue
-
-        if links:
-            self.log(f"  [OK] Extracted {len(links)} job links")
-            return links
-
-        # ── Tertiary: Fallback with score_job_url ─────────────
-        self.log("  [!] Direct job links not found, scanning all links with URL scoring...")
-        all_links = page.css('a[href]')
-        for link in all_links:
-            try:
-                href = link.attrib.get('href', '')
-                if not href or href.startswith('#') or href.startswith('javascript:'):
-                    continue
-                if href.startswith('/'):
-                    href = 'https://www.naukri.com' + href
-                s = score_job_url(href)
-                if s >= 2 and href not in seen_urls:
-                    seen_urls.add(href)
-                    title = (self._sel_text(link) or '').strip()
-                    if len(title) < 3:
-                        continue
-                    if any(w in title.lower() for w in ['view all', 'register', 'career',
-                                                          'help center', 'interview', 'resume',
-                                                          'salary', 'recommended', 'filter',
-                                                          'review', 'rating']):
-                        continue
-                    links.append({'url': href, 'company': '', 'title': title[:120]})
-            except Exception:
+                job = self._parse_card(card)
+                if job.get('role'):
+                    jobs.append(job)
+            except Exception as e:
                 continue
-        self.log(f"  [OK] Fallback link scan: {len(links)} job links")
-        return links
 
-    # ── Individual Job Page ──────────────────────────────────────────
+        self.log(f"  [OK] Parsed {len(jobs)} jobs from cards")
+        return jobs
 
-    def scrape_job_page(self, url: str) -> Optional[dict]:
-        """Extract full job details from an individual Naukri job page."""
-        self.log(f"\n  Fetching: {url[:80]}...")
-        page = self._fetch_page(url)
-        if not page:
-            self.log("  [FAIL] Empty page")
-            return None
-        if self._check_captcha(page):
-            self.log("  [FAIL] CAPTCHA")
-            return None
+    def _parse_card(self, card) -> dict:
+        """Extract all data from a single job card element."""
 
-        company = self._extract_text(page, ['.jd-header-title-company', 'a[class*="company"]',
-                                            '[class*="company-name"]', '.companyInfo .companyName'])
-        role = self._extract_text(page, ['.jd-header-title', 'h1[class*="title"]', 'h1'])
-        description = self._extract_text(page, ['.job-details-description', '.jd-desc',
-                                                'div[class*="description"]', '.job-description'])
+        # ── Job Title ──
+        title_el = card.select_one('a[href*="job-listings"]')
+        role = clean_text(title_el.get_text()) if title_el else ''
+
+        # ── Company Name ──
+        company_el = card.select_one('a[href*="-jobs-careers-"]')
+        company = clean_text(company_el.get_text()) if company_el else ''
+
+        # ── Full Card Text ──
+        all_text = card.get_text(separator=' ', strip=True)
+        all_text = re.sub(r'\s+', ' ', all_text)
+
+        # ── Experience ──
+        exp_match = re.search(r'(\d+[-\s]to\s*\d+|\d+[-\s]*\d+)\s*Yrs?', all_text, re.I)
+        experience = exp_match.group(1).strip() + ' Yrs' if exp_match else ''
+
+        # ── Location ──
+        # After experience, the location is typically the next word/phrase
+        locations = ['Bengaluru', 'Bangalore', 'Mumbai', 'Delhi', 'Pune', 'Hyderabad',
+                     'Chennai', 'Kolkata', 'Ahmedabad', 'Gurugram', 'Gurgaon', 'Noida',
+                     'Remote', 'Work From Home', 'India']
+        location = ''
+        if exp_match:
+            after_exp = all_text[exp_match.end():]
+            for loc in sorted(locations, key=len, reverse=True):
+                if loc.lower() in after_exp.lower()[:80]:
+                    # Find the actual location text
+                    idx = after_exp.lower().find(loc.lower())
+                    location = after_exp[idx:idx+len(loc)].strip()
+                    break
+        if not location:
+            for loc in locations:
+                if loc.lower() in all_text.lower():
+                    idx = all_text.lower().find(loc.lower())
+                    location = all_text[idx:idx+len(loc)].strip()
+                    break
+
+        # ── Skills ──
+        # Skills are typically comma-separated or space-separated words after the description
+        # Look for skill tag elements specifically
+        skill_elements = card.select('[class*="skill"], [class*="key"], a[class*="skill"], span[class*="skill"]')
+        skills = []
+        for se in skill_elements:
+            t = clean_text(se.get_text())
+            if t and len(t) > 1:
+                skills.append(t)
+
+        # Fallback: extract skills from card text by looking for known skill patterns
+        if not skills:
+            # Skills are typically the words after "..." and before "day(s) ago"
+            parts = re.split(r'\d+\s+day[s]?\s+ago|\d+\s+hour[s]?\s+ago|Today|Just now', all_text, flags=re.I)
+            if len(parts) >= 2:
+                skills_text = parts[-2]  # Part before the time ago
+                # Remove description-like text
+                skills_text = re.sub(r'Description:.*?Requirements:', '', skills_text, flags=re.I)
+                # Extract capitalized words (common in skills)
+                potential_skills = re.findall(r'\b[A-Z][a-zA-Z+#.]{2,40}\b', skills_text)
+                # Filter out common non-skills
+                exclude = {'Reviews', 'Yrs', 'Save', 'Today', 'Apply', 'View', 'More',
+                           'Register', 'Login', 'Share', 'Facebook', 'Twitter', 'LinkedIn',
+                           'Data', 'Science', 'Engineer', 'Engineering', 'Description',
+                           'Requirements', 'Education', 'Job', 'Work', 'Bangalore',
+                           'Bengaluru', 'Mumbai', 'India', 'Monday', 'Tuesday', 'Wednesday',
+                           'Thursday', 'Friday', 'Saturday', 'Sunday', 'January', 'February',
+                           'March', 'April', 'May', 'June', 'July', 'August', 'September',
+                           'October', 'November', 'December', 'Senior', 'Junior', 'Lead',
+                           'Principal', 'Staff', 'Associate', 'Manager', 'Director', 'Head'}
+                skills = [s for s in potential_skills if s not in exclude][:15]
+
+        # ── Description ──
+        # Extract text between company+exp and skills  
+        # The card text has this pattern:
+        #   "Job Title Company Rating Reviews X-Y Yrs Location Description text... Skill1 Skill2 Skill3 N days ago"
+        description = ''
+        if exp_match:
+            # Get text after experience+location and before skills
+            desc_start = exp_match.end()
+            desc_end = len(all_text)
+            
+            # Try to find where skills start (look for common patterns)
+            skills_markers = ['\xa0', '  ', '…', '...']
+            desc_segment = all_text[desc_start:]
+
+            # Remove location from desc_segment
+            if location and location in desc_segment:
+                desc_segment = desc_segment[desc_segment.find(location) + len(location):]
+
+            # Get clean description (first 200 chars or until we hit skill-like text)
+            desc_segment = desc_segment.strip()
+            # Remove "Apply" "Save" "Share" etc.
+            desc_segment = re.sub(r'\b(Apply|Save|Share|View|More)\b.*', '', desc_segment, flags=re.I)
+            # Remove age indicator
+            desc_segment = re.sub(r'\d+\s+day[s]?\s+ago.*$', '', desc_segment, flags=re.I)
+            desc_segment = re.sub(r'(Today|Just now).*$', '', desc_segment, flags=re.I)
+
+            description = clean_text(desc_segment)
+
+        if not description:
+            # Try to get description from text after company
+            if company and company in all_text:
+                after_company = all_text[all_text.find(company) + len(company):]
+                # Remove rating/reviews
+                after_company = re.sub(r'\d+\.?\d*\s*\d*\s*Reviews?\s*', '', after_company)
+                # Remove experience
+                after_company = re.sub(r'\d+[-\s]\d+\s*Yrs?\s*', '', after_company)
+                # Remove location
+                if location:
+                    after_company = after_company.replace(location, '')
+                # Clean up
+                description = clean_text(after_company[:300])
+
+        # Limit description to first 300 chars for the snippet
+        if len(description) > 300:
+            description = description[:297] + '...'
+
+        # Generate bullet points from description
         bullets = extract_bullets(description) if description else []
-        skills = self._extract_all_texts(page, ['.key-skill', '.skill', '[class*="skill"] a'])
-        location = self._extract_text(page, ['.location', '.loc', '[class*="location"]'])
-        experience = self._extract_text(page, ['.experience', '.exp', '[class*="exp"]', '.work-exp'])
-        education = self._extract_text(page, ['.education', '.edu', '[class*="education"]'])
-        highlights = self._extract_text(page, ['.job-highlights', '.job-summary', '[class*="highlight"]'])
-
-        emp_type = dept = industry = ''
-        dt = self._extract_text(page, ['.other-details', '.job-other-details', '[class*="detail"]'])
-        if dt:
-            for line in re.split(r'[\n•▪]', dt):
-                line = line.strip()
-                if not line: continue
-                if re.search(r'employment\s*type', line, re.I):
-                    emp_type = re.sub(r'employment\s*type\s*:?\s*', '', line, flags=re.I).strip()
-                elif re.search(r'industry', line, re.I) and 'employment' not in line.lower():
-                    industry = re.sub(r'industry\s*(type)?\s*:?\s*', '', line, flags=re.I).strip()
-                elif re.search(r'department|dept', line, re.I):
-                    dept = re.sub(r'department\s*:?\s*', '', line, flags=re.I).strip()
-
-        self.log(f"    Company: {company[:60] or '[MISSING]'}{' [OK]' if company else ''}")
-        self.log(f"    Role: {role[:60] or '[MISSING]'}")
-        self.log(f"    Description: {len(description)} chars, {len(bullets)} bullets")
-        if skills: self.log(f"    Skills: {len(skills)}")
-        if location: self.log(f"    Location: {location[:40]}")
 
         return {
-            'company': company or '[COMPANY_NOT_FOUND]',
-            'role': role or '[ROLE_NOT_FOUND]',
-            'description': description or '',
+            'company': company or '',
+            'role': role,
+            'description': description,
             'descriptionBullets': bullets,
-            'skills': skills, 'location': location or '',
-            'experience': experience or '', 'education': education or '',
-            'employmentType': emp_type or '', 'department': dept or '',
-            'industry': industry or '', 'highlights': highlights or '',
-            'source': 'scrapling-naukri',
+            'skills': skills,
+            'location': location,
+            'experience': experience,
+            'source': 'scrapling-card',
         }
 
-    # ── Full Pipeline ────────────────────────────────────────────────
+    # ── Full Pipeline ────────────────────────────────────────────
 
     def scrape_listing(self, url: str, max_jobs: int = 50) -> list:
-        """Full pipeline: listing page → extract URLs → scrape each → Excel."""
+        """Scrape Naukri listing: fetch page → parse cards → return data."""
         self.log(f"\n{'='*60}")
-        self.log("NAUKRI SCRAPER v2.0 (Scrapling)")
+        self.log("NAUKRI SCRAPER v4.0 (Card-based extraction)")
         self.log(f"{'='*60}")
         self.log(f"URL: {url}\n")
 
-        # Step 1: Fetch listing
+        # Step 1: Fetch
         self.log("Step 1: Fetching listing page...")
-        page = self._fetch_page(url)
-        if not page:
-            self.log("[FAIL] Could not fetch")
+        html = self._fetch_listing(url)
+        if not html or len(html) < 5000:
+            self.log("[FAIL] Page too small or empty")
             return []
-        if self._check_captcha(page):
-            self.log("[FAIL] CAPTCHA!")
-            return []
-        self.log(f"[OK] Loaded (title: {(page.css('title::text').get() or '')[:60]})")
 
-        # Step 2: Extract links
-        self.log("\nStep 2: Extracting job links...")
-        job_links = self.extract_job_links(page)
-        if not job_links:
-            self.log("[FAIL] No job links found")
+        if 'access denied' in html[:2000].lower():
+            self.log("[FAIL] Access denied by server")
             return []
-        if len(job_links) > max_jobs:
-            job_links = job_links[:max_jobs]
-        self.log(f"  Processing {len(job_links)} jobs")
 
-        # Step 3: Scrape each
-        self.log(f"\nStep 3: Scraping {len(job_links)} job pages...")
-        jobs, seen_fp = [], set()
-        for i, jl in enumerate(job_links, 1):
-            self.log(f"\n--- Job {i}/{len(job_links)} ---")
-            result = self.scrape_job_page(jl['url'])
-            if result:
-                if not result['company'] or result['company'].startswith('[COMPANY_'):
-                    result['company'] = jl.get('company', '') or result['company']
-                if not result['role'] or result['role'].startswith('[ROLE_'):
-                    result['role'] = jl.get('title', '') or result['role']
-                fp = f"{result['company']}|{result['role']}|{result['description'][:100]}"
-                if fp not in seen_fp:
-                    seen_fp.add(fp)
-                    jobs.append(result)
-                    self.log(f"  [OK] Added: {result['company'][:40]} — {result['role'][:40]}")
-                else:
-                    self.log(f"  [-] Duplicate")
-            elif jl.get('company') or jl.get('title'):
-                fb = {'company': jl.get('company', '') or '[MISSING]',
-                       'role': jl.get('title', '') or '[MISSING]',
-                       'description': '', 'descriptionBullets': [],
-                       'skills': [], 'location': '', 'experience': '', 'education': '',
-                       'employmentType': '', 'department': '', 'industry': '', 'highlights': '',
-                       'source': 'listing-card'}
-                jobs.append(fb)
-                self.log(f"  [!] Listing card fallback: {fb['company'][:40]}")
-            if i < len(job_links):
-                time.sleep(1.5)
+        # Check page title
+        title_match = re.search(r'<title>([^<]+)</title>', html, re.I)
+        if title_match:
+            self.log(f"  Title: {title_match.group(1)[:70]}")
+        self.log(f"  Size: {len(html)} chars")
+
+        # Step 2: Parse cards
+        self.log("\nStep 2: Extracting job cards...")
+        all_jobs = self.extract_cards(html)
+
+        # Step 3: Deduplicate & limit
+        if not all_jobs:
+            self.log("[FAIL] No jobs extracted")
+            return []
+
+        seen = set()
+        unique = []
+        for job in all_jobs:
+            fp = f"{job['company']}|{job['role']}|{job['description'][:50]}"
+            if fp not in seen:
+                seen.add(fp)
+                unique.append(job)
+
+        if len(unique) > max_jobs:
+            unique = unique[:max_jobs]
 
         self.log(f"\n{'='*60}")
-        self.log(f"RESULT: {len(jobs)} jobs scraped!")
+        self.log(f"RESULT: {len(unique)} jobs extracted!")
+        has_desc = sum(1 for j in unique if j.get('description'))
+        self.log(f"  With descriptions: {has_desc}/{len(unique)}")
+        has_skills = sum(1 for j in unique if j.get('skills'))
+        self.log(f"  With skills: {has_skills}/{len(unique)}")
         self.log(f"{'='*60}")
-        return jobs
+        return unique
 
     def export_excel(self, jobs: list, filename: str = "jd_scraper_output.xlsx") -> str:
         return export_excel(jobs, filename)
@@ -445,7 +417,7 @@ def main():
     jobs = scraper.scrape_listing(args.url, max_jobs=args.max)
     if jobs:
         scraper.export_excel(jobs, args.output)
-        print(f"\nDone! {len(jobs)} jobs → '{args.output}'")
+        print(f"\nDone! {len(jobs)} jobs -> '{args.output}'")
         return 0
     print("\nNo jobs found.")
     return 1
