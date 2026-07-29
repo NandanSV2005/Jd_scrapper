@@ -167,7 +167,7 @@ function scrapePage(options = {}) {
 
     if (items.length > 0) {
       logger(`✓ TOTAL: ${items.length} entries with real data`);
-      return buildResult(items, log, pageType);
+      return buildResult(items, log, pageType, logger);
     }
   }
 
@@ -241,12 +241,12 @@ function scrapePage(options = {}) {
     logger(`✓ TOTAL: ${items.length} entries`);
   }
 
-  return buildResult(items, log, pageType);
+  return buildResult(items, log, pageType, logger);
 }
 
 // ─── Build result object ────────────────────────────────────────────────────
 
-function buildResult(items, log, pageType) {
+function buildResult(items, log, pageType, logger) {
   const result = {
     data: items,
     count: items.length,
