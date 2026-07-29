@@ -3,12 +3,8 @@
  * Handles user interaction, scraping, and Excel generation
  */
 
-// SheetJS library URL (loaded from CDN)
-const XLSX_CDN = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js';
-
 // State
 let scrapedData = [];
-let xlsxLoaded = false;
 
 // DOM elements
 const pageUrl = document.getElementById('pageUrl');
@@ -63,26 +59,6 @@ function showStatus(message, type = 'loading', details = '') {
 
 function hideStatus() {
   statusArea.style.display = 'none';
-}
-
-// ─── Load SheetJS ─────────────────────────────────────────────────────────
-
-function loadXLSX() {
-  return new Promise((resolve, reject) => {
-    if (typeof XLSX !== 'undefined') {
-      xlsxLoaded = true;
-      resolve();
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = XLSX_CDN;
-    script.onload = () => {
-      xlsxLoaded = true;
-      resolve();
-    };
-    script.onerror = () => reject(new Error('Failed to load Excel library'));
-    document.head.appendChild(script);
-  });
 }
 
 // ─── Generate Excel ──────────────────────────────────────────────────────
@@ -206,7 +182,6 @@ async function scrapePage() {
     // Auto-download if enabled
     if (autoDownload.checked) {
       try {
-        await loadXLSX();
         const filename = generateExcel(scrapedData);
         showStatus(
           `Downloaded ${scrapedData.length} entries to Excel`,
@@ -248,7 +223,6 @@ downloadBtn.addEventListener('click', async () => {
   }
   try {
     showStatus('Generating Excel file...', 'loading');
-    await loadXLSX();
     const filename = generateExcel(scrapedData);
     showStatus(
       `Downloaded ${scrapedData.length} entries!`,
