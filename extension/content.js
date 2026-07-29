@@ -153,6 +153,12 @@ const SITE_SELECTORS = {
       '.jd-header-title',
       '.job-header-corp',
       '.job-details-jobs-unified-top-card',
+      '.styles_jd-header-title',
+      '[class*="jd-header"]',
+      '[class*="job-header"]',
+      '.job-detail',
+      'h1[class*="title"]',
+      '.description',
     ],
   },
 };
@@ -201,8 +207,14 @@ function scrapePage(options = {}) {
   logger(`Page type: ${pageType.type} (${pageType.reason})`);
 
   // ── Step 2: If individual job page on known site, use site-specific extraction ──
-  if (pageType.type === 'job' && pageType.site) {
-    logger(`→ Site-specific extraction for "${pageType.site}"`);
+  if (pageType.site) {
+    // Always try site-specific extraction if we know the site,
+    // even if pageType wasn't detected as 'job' (the selectors may still match)
+    if (pageType.type !== 'job') {
+      logger(`→ Trying site-specific extraction anyway (site known: "${pageType.site}")`);
+    } else {
+      logger(`→ Site-specific extraction for "${pageType.site}"`);
+    }
     const siteItems = extractFromJobPage(pageType.site, logger);
     for (const item of siteItems) {
       if (validateItem(item, dedup, seenFingerprints, logger)) {
@@ -211,7 +223,7 @@ function scrapePage(options = {}) {
     }
     logger(`Site-specific: ${siteItems.length} items extracted`);
 
-    if (items.length > 0) {
+    if (items.length > 0 && pageType.type === 'job') {
       logger(`✓ TOTAL: ${items.length} entries with real data`);
       return buildResult(items, log, pageType, logger);
     }
@@ -1040,13 +1052,17 @@ function extractJobLinks() {
 
     if (naukriCards.length > 0) {
       naukriCards.forEach(card => {
-        // Try all possible job link patterns
-        const linkEl = card.querySelector(
-          'a[href*="/job-listings"], a[href*="job-details"], a[href*="-job-"], ' +
-          'a[href*="jobs"], a[class*="title"], a.title, ' +
-          'a[href*="/ai-jobs"], a[href*="/software"], a[href*="/engineer"]'
-        );
-        const url = linkEl ? linkEl.href : '';
+        // Find ALL job-like links in the card, pick the best one
+        const allJobLinks = card.querySelectorAll('a[href]');
+        let bestLink = null, bestScore = -1;
+        for (const link of allJobLinks) {
+          const score = scoreJobUrl(link.href);
+          if (score > bestScore) {
+            bestScore = score;
+            bestLink = link;
+          }
+        }
+        const url = bestLink ? bestLink.href : '';
         // Try all possible company name patterns
         const companyEl = card.querySelector(
           '.company-name, .comp-name, .comp-dtls, .subTitle, ' +
@@ -1054,12 +1070,12 @@ function extractJobLinks() {
         );
         const company = companyEl ? companyEl.textContent.trim() : '';
         // Try all possible role/title patterns
-        const roleEl = linkEl || card.querySelector(
+        const roleEl = bestLink || card.querySelector(
           '.title, a.title, [class*="title"] a, h2, h3, ' +
           'a[class*="title"], [class*="job-title"]'
         );
         const role = roleEl ? roleEl.textContent.trim() : '';
-        if (url) addLink(url, company.trim(), role.trim());
+        if (url && scoreJobUrl(url) >= 2) addLink(url, company.trim(), role.trim());
       });
     }
   } else {
@@ -1166,6 +1182,45 @@ function extractJobLinks() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Job URL Scoring: returns a score indicating how likely a URL is an individual
+// job posting vs a category/search/filter listing page.
+// Score >= 3: high confidence individual job posting
+// Score = 2: likely individual job posting
+// Score = 1: uncertain
+// Score = 0: category/search/filter page
+// ═════════════════════════════════════════════════════════════════════════════
+
+function scoreJobUrl(url) {
+  const path = (new URL(url)).pathname;
+  let score = 0;
+
+  // Penalty: clearly a search/filter/category page (NOT an individual job)
+  if (/\/(?:jobs|search|companies|recruiters?|skills|location|salary|q=)/i.test(path)) {
+    // But individual job URLs often also contain "jobs" or "search" — check more carefully
+    if (path.split('/').length <= 3 && !path.match(/\d{5,}/)) {
+      return 0; // Shallow path without numeric ID = category page
+    }
+    score = 1; // Low score — might still be a job if it has an ID
+  }
+
+  // Positive signals: numeric ID patterns (individual jobs have IDs)
+  if (/\/[a-zA-Z-]+-\d{5,}/.test(path)) score += 2; // /job-title-12345678
+  if (/\/\d{6,}/.test(path)) score += 3; // Naukri short-link: /12345678 (pure numeric path segment)
+  if (/\d{6,}/.test(path)) score += 1; // Any 6+ digit number in path
+  if (/\/job-listings/i.test(path)) score += 2; // Common Naukri pattern
+  if (/\/job-details/i.test(path)) score += 3; // Explicit job detail path
+  if (/viewjob/i.test(path) || /\?jk=/.test(url)) score += 3; // Indeed style
+  if (/\/jobs\/view\//i.test(path)) score += 3; // LinkedIn style
+  if (/\/jobs\/\d+\//.test(path)) score += 3; // /jobs/12345/
+
+  // Penalty: clearly NOT an individual job
+  if (/reviews|rating|interview|salary|benefit|contact/i.test(path)) return 0;
+  if (path.split('/').filter(Boolean).length <= 1) return 0; // Too shallow
+
+  return score;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Bullet Point Extraction
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -1175,7 +1230,7 @@ function extractBullets(text) {
   // Strip HTML tags first
   const cleaned = text.replace(/<[^>]*>/g, '\n');
   // Split on bullet chars, newlines, or numbered lists
-  const lines = cleaned.split(/[•·●◆◇▪▸▹►▻‣⁃⦿✦✧\-]\s*|[\n\r]+|(?:\d+[.)])\s*/);
+  const lines = cleaned.split(/[•·●◆◇▪▸▹►▻‣⁃⦿✦✧]\s*|[\n\r]+|(?:\d+[.)])\s*/);
   return lines
     .map(l => l.replace(/\s+/g, ' ').trim())
     .filter(l => l.length > 10)

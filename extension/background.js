@@ -125,13 +125,28 @@ async function startBatchScrape(urls) {
       }
 
       // Extra wait for dynamic content (JS-rendered pages like LinkedIn/Naukri)
-      await delay(2500);
+      await delay(3500);
 
       // Send scrape message to the tab's content script
-      const result = await sendMessageToTab(tab.id, {
+      let result = await sendMessageToTab(tab.id, {
         action: 'scrape',
         options: { dedup: true, deepMode: true },
       });
+
+      // If content script didn't respond, try injecting it
+      if (!result) {
+        console.log(`[Batch] [${i + 1}/${validUrls.length}] Content script not responding — trying injection...`);
+        try {
+          await chrome.tabs.executeScript(tab.id, { file: 'content.js' });
+          await delay(1500);
+          result = await sendMessageToTab(tab.id, {
+            action: 'scrape',
+            options: { dedup: true, deepMode: true },
+          });
+        } catch (injectErr) {
+          console.log(`[Batch] Injection also failed: ${injectErr.message}`);
+        }
+      }
 
       if (result && result.data && result.data.length > 0) {
         // Add company/role from listing card if extraction failed on detail page
