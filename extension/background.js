@@ -139,6 +139,14 @@ async function startBatchScrape(urls) {
           ...item,
           company: (item.company && !item.company.startsWith('[COMPANY_')) ? item.company : (jobLink.company || item.company),
           role: (item.role && !item.role.startsWith('[ROLE_')) ? item.role : (jobLink.role || item.role),
+          skills: item.skills || [],
+          highlights: item.highlights || '',
+          location: item.location || '',
+          experience: item.experience || '',
+          education: item.education || '',
+          employmentType: item.employmentType || '',
+          department: item.department || '',
+          industry: item.industry || '',
         }));
         batchState.results.push(...enriched);
         console.log(`[Batch] [${i + 1}/${validUrls.length}] Got ${enriched.length} entry(ies)`);

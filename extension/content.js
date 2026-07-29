@@ -89,12 +89,15 @@ const SITE_SELECTORS = {
       '.companyInfo .companyName',
       '[class*="company-name"]',
       '.job-header-corp .company-name',
+      '.job-company-wrapper a',
     ],
     role: [
       '.jd-header-title',
       'h1[class*="title"]',
       '.job-header-corp h1',
       '[class*="job-title"] h1',
+      'h1.job-title',
+      '.job-details-jobs-unified-top-card__job-title',
     ],
     description: [
       '.job-details-description',
@@ -102,11 +105,54 @@ const SITE_SELECTORS = {
       'div[class*="description"]',
       '.job-description',
       '.details-section',
+      '.job-description-section',
+    ],
+    highlights: [
+      '.job-highlights',
+      '.job-summary',
+      '[class*="highlight"]',
+      '.job-header-brief',
+    ],
+    skills: [
+      '.key-skill',
+      '.skill',
+      '[class*="skill"] a',
+      '.tags-container a',
+      '.skill-tag',
+      '.jd-skills a',
+    ],
+    location: [
+      '.location',
+      '.loc',
+      '[class*="location"]',
+      '.job-location',
+      '[class*="place"]',
+    ],
+    experience: [
+      '.experience',
+      '.exp',
+      '[class*="exp"]',
+      '.work-exp',
+      '.job-experience',
+    ],
+    education: [
+      '.education',
+      '.edu',
+      '[class*="education"]',
+      '.eligibility',
+    ],
+    jobDetails: [
+      '.other-details',
+      '.job-other-details',
+      '.job-detail',
+      '[class*="detail"]',
+      'table td',
     ],
     isJobPage: [
       '.job-details-description',
       '.jd-header-title',
       '.job-header-corp',
+      '.job-details-jobs-unified-top-card',
     ],
   },
 };
@@ -404,78 +450,135 @@ function extractFromJobPage(site, logger) {
   const selectors = SITE_SELECTORS[site];
   const items = [];
 
-  // ── Extract Company Name ─────────────────────────────────────────────
-  let company = '';
-  for (const sel of selectors.company) {
-    const el = document.querySelector(sel);
-    if (el) {
-      company = el.textContent.trim();
-      logger(`  Company selector "${sel}": "${company}"`);
-      if (company && company.length > 1) break;
-    } else {
-      logger(`  Company selector "${sel}": not found`);
+  // ── Helper: extract text from first matching selector ─────────────
+  function findText(selectorList) {
+    if (!selectorList) return '';
+    for (const sel of selectorList) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const text = el.textContent.trim();
+        if (text && text.length > 0) return text;
+      }
     }
+    return '';
   }
 
-  if (!company) {
-    logger(`  ✗ COMPANY NAME NOT FOUND — tried ${selectors.company.length} selectors`);
+  // ── Helper: extract array of items from multiple matching elements ──
+  function findAllTexts(selectorList) {
+    if (!selectorList) return [];
+    const results = [];
+    const seen = new Set();
+    for (const sel of selectorList) {
+      document.querySelectorAll(sel).forEach(el => {
+        const text = el.textContent.trim();
+        if (text && text.length > 0 && !seen.has(text)) {
+          seen.add(text);
+          results.push(text);
+        }
+      });
+      if (results.length > 0) break;
+    }
+    return results;
+  }
+
+  // ── Extract Company Name ─────────────────────────────────────────────
+  let company = findText(selectors.company);
+  if (company) {
+    logger(`  Company: "${company}"`);
+  } else {
+    logger(`  ✗ COMPANY NAME NOT FOUND`);
   }
 
   // ── Extract Job Role ─────────────────────────────────────────────────
-  let role = '';
-  for (const sel of selectors.role) {
-    const el = document.querySelector(sel);
-    if (el) {
-      role = el.textContent.trim();
-      logger(`  Role selector "${sel}": "${role.substring(0, 80)}..."`);
-      if (role && role.length > 1) break;
-    } else {
-      logger(`  Role selector "${sel}": not found`);
-    }
-  }
-
+  let role = findText(selectors.role);
   if (!role) {
-    // Fallback: try <h1> as job title
     const h1 = document.querySelector('h1');
     if (h1) {
       role = h1.textContent.trim();
       logger(`  Role fallback <h1>: "${role.substring(0, 80)}..."`);
     }
+  } else {
+    logger(`  Role: "${role.substring(0, 80)}..."`);
   }
 
-  // ── Extract Job Description ──────────────────────────────────────────
+  // ── Extract Job Description (preserve structure) ───────────────────
   let description = '';
-  for (const sel of selectors.description) {
+  for (const sel of (selectors.description || [])) {
     const el = document.querySelector(sel);
     if (el) {
       description = (el.innerText || el.textContent || '').trim();
       logger(`  Description selector "${sel}": ${description.length} chars`);
       if (description && description.length > 20) break;
-    } else {
-      logger(`  Description selector "${sel}": not found`);
     }
   }
-
   if (!description) {
-    logger(`  ✗ JOB DESCRIPTION NOT FOUND — tried ${selectors.description.length} selectors`);
+    logger(`  ✗ JOB DESCRIPTION NOT FOUND`);
   }
 
-  // Clean up description - remove excessive whitespace
-  if (description) {
-    description = description.replace(/\s+/g, ' ').trim();
+  // ── Extract Job Highlights / Summary ───────────────────────────────
+  let highlights = findText(selectors.highlights);
+  if (highlights) logger(`  Highlights: ${highlights.substring(0, 100)}...`);
+
+  // ── Extract Key Skills ─────────────────────────────────────────────
+  const skills = findAllTexts(selectors.skills);
+  if (skills.length > 0) logger(`  Skills: ${skills.join(', ').substring(0, 120)}...`);
+
+  // ── Extract Location ───────────────────────────────────────────────
+  let location = findText(selectors.location);
+  if (location) logger(`  Location: "${location}"`);
+
+  // ── Extract Experience ─────────────────────────────────────────────
+  let experience = findText(selectors.experience);
+  if (experience) logger(`  Experience: "${experience}"`);
+
+  // ── Extract Education ──────────────────────────────────────────────
+  let education = findText(selectors.education);
+  if (education) logger(`  Education: "${education.substring(0, 80)}..."`);
+
+  // ── Extract Job Details (role type, industry, dept, employment) ───
+  let employmentType = '', department = '', industry = '';
+  const detailsText = findText(selectors.jobDetails);
+  if (detailsText) {
+    // Parse structured detail text for known labels
+    const lines = detailsText.split(/\n|•|▪/).map(l => l.trim()).filter(l => l);
+    for (const line of lines) {
+      const lower = line.toLowerCase();
+      if (/employment\s*type|employment type/i.test(line)) {
+        employmentType = line.replace(/employment\s*type\s*:?\s*/i, '').trim();
+      } else if (/industry\s*type|industry/i.test(line) && !line.includes('employment')) {
+        industry = line.replace(/industry\s*(type)?\s*:?\s*/i, '').trim();
+      } else if (/department|dept/i.test(line)) {
+        department = line.replace(/department\s*:?\s*/i, '').trim();
+      }
+    }
   }
+  if (employmentType) logger(`  Employment: "${employmentType}"`);
+  if (department) logger(`  Department: "${department}"`);
+  if (industry) logger(`  Industry: "${industry}"`);
+
+  // ── Extract Bullet Points from Description ─────────────────────────
+  // Keep original line breaks for proper bullet formatting
+  const bullets = description ? extractBullets(description) : [];
+  logger(`  Description: ${bullets.length} bullet points`);
 
   // Only add if we got something useful
   if (company || role) {
-    const bullets = description ? extractBullets(description) : [];
-    logger(`  → Entry: company="${company || '[NOT FOUND]'}" role="${role || '[NOT FOUND]'}" ${bullets.length} bullets`);
     items.push({
       company: company || '[COMPANY_NOT_FOUND]',
       role: role || '[ROLE_NOT_FOUND]',
       description: description || '',
       descriptionBullets: bullets,
+      highlights: highlights || '',
+      skills: skills,
+      location: location || '',
+      experience: experience || '',
+      education: education || '',
+      employmentType: employmentType || '',
+      department: department || '',
+      industry: industry || '',
       source: `${site}-job-page`,
     });
+    logger(`  → Entry: ${company} | ${role} | ${bullets.length} bullets | ${skills.length} skills`);
   }
 
   return items;

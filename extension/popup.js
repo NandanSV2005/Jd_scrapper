@@ -214,33 +214,86 @@ function generateExcel(data) {
     return;
   }
 
-  const rows = [['S.No', 'Company Name', 'Job Role', 'Job Description', 'Source']];
+  const rows = [[
+    'S.No', 'Company Name', 'Job Role',
+    'Job Description (Bullet Points)', 'Key Skills',
+    'Location', 'Experience', 'Education',
+    'Employment Type', 'Department', 'Industry',
+    'Job Highlights', 'Source'
+  ]];
+
   data.forEach((item, idx) => {
-    const bullets = item.descriptionBullets && item.descriptionBullets.length > 0
+    // Format description as bullet points on separate lines
+    const descBullets = item.descriptionBullets && item.descriptionBullets.length > 0
       ? item.descriptionBullets.map(b => `• ${b}`).join('\n')
       : item.description || 'No description';
+
+    // Format skills as comma-separated
+    const skillsStr = item.skills && Array.isArray(item.skills) && item.skills.length > 0
+      ? item.skills.join(', ')
+      : '';
+
     rows.push([
       idx + 1,
       item.company || '',
       item.role || '',
-      bullets,
+      descBullets,
+      skillsStr,
+      item.location || '',
+      item.experience || '',
+      item.education || '',
+      item.employmentType || '',
+      item.department || '',
+      item.industry || '',
+      item.highlights || '',
       item.source || 'Extension'
     ]);
   });
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(rows);
+
+  // Set column widths
   ws['!cols'] = [
     { wch: 6 },   // S.No
     { wch: 30 },  // Company
-    { wch: 35 },  // Role
-    { wch: 80 },  // Description
+    { wch: 35 },  // Job Role
+    { wch: 80 },  // Description (wider for bullets)
+    { wch: 35 },  // Key Skills
+    { wch: 20 },  // Location
+    { wch: 15 },  // Experience
+    { wch: 25 },  // Education
+    { wch: 18 },  // Employment Type
+    { wch: 25 },  // Department
+    { wch: 25 },  // Industry
+    { wch: 50 },  // Job Highlights
     { wch: 15 },  // Source
   ];
+
+  // Enable text wrapping on description and highlights columns
+  // so bullet points show on separate lines
+  if (!ws['!rows']) ws['!rows'] = [];
+  for (let i = 0; i <= data.length; i++) {
+    if (!ws['!rows'][i]) ws['!rows'][i] = {};
+    ws['!rows'][i].hpx = 20; // default row height
+  }
+  // Set taller row height for data rows with long descriptions
+  for (let i = 1; i <= data.length; i++) {
+    const item = data[i - 1];
+    const bulletCount = (item.descriptionBullets && item.descriptionBullets.length) || 0;
+    if (bulletCount > 10) {
+      if (!ws['!rows'][i]) ws['!rows'][i] = {};
+      ws['!rows'][i].hpx = Math.min(400, bulletCount * 18);
+    } else if (bulletCount > 3) {
+      if (!ws['!rows'][i]) ws['!rows'][i] = {};
+      ws['!rows'][i].hpx = 120;
+    }
+  }
+
   XLSX.utils.book_append_sheet(wb, ws, 'Job Listings');
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-  const filename = `jobs_scraped_${timestamp}.xlsx`;
+  const filename = `jd_scraper_${timestamp}.xlsx`;
   XLSX.writeFile(wb, filename);
   return filename;
 }
