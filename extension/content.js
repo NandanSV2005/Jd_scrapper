@@ -1,10 +1,13 @@
 /**
  * Job Scraper Pro - Content Script
- * Runs on any page and extracts company/job data from the live DOM.
- * Uses the real browser session - no anti-bot issues!
+ * Extracts company names, job roles, and descriptions from any page.
+ * Detects page type (listing vs individual job) and uses appropriate strategies.
+ * v2.0 - Fixes: company name extraction, job description extraction,
+ * page type detection, transparent logging, no silent placeholders.
  */
 
-// Company detection patterns
+// ─── Constants ──────────────────────────────────────────────────────────────
+
 const COMPANY_SUFFIXES = [
   'inc', 'ltd', 'limited', 'pvt', 'private', 'corp', 'corporation',
   'llc', 'llp', 'plc', 'gmbh', 'ag', 'sa', 'bv', 'nv', 'pty',
@@ -14,7 +17,6 @@ const COMPANY_SUFFIXES = [
   'ventures', 'partners', 'associates', 'analytics', 'data', 'infotech',
 ];
 
-// Common non-company words to exclude
 const EXCLUDE_WORDS = new Set([
   'home', 'about', 'contact', 'search', 'login', 'sign', 'register',
   'jobs', 'careers', 'apply', 'submit', 'next', 'previous', 'page',
@@ -25,7 +27,91 @@ const EXCLUDE_WORDS = new Set([
   'products', 'services', 'solutions', 'pricing', 'blog', 'contact us',
 ]);
 
-// ─── Listen for scrape requests from popup ─────────────────────────────────
+// Site-specific selectors for individual job posting pages
+const SITE_SELECTORS = {
+  'indeed.com': {
+    company: [
+      '[data-testid="inlineHeader-companyName"]',
+      '.jobsearch-JobInfoHeader-companyName',
+      '.icl-u-lg-mr--sm',
+      '[data-tn-component="companyHeader"]',
+    ],
+    role: [
+      '.jobsearch-JobInfoHeader-title',
+      'h1[class**="title"]',
+      '[data-testid="jobsearch-JobInfoHeader-title"]',
+      '.jobsearch-JobInfoHeader-title > span',
+    ],
+    description: [
+      '#jobDescriptionText',
+      '.jobsearch-jobDescriptionText',
+      '#jobDescriptionText > div',
+      '[id*="jobDescription"]',
+      '.jobsearch-JobComponent-description',
+    ],
+    isJobPage: [
+      '#jobDescriptionText',
+      '.jobsearch-JobInfoHeader',
+      '[data-testid="jobsearch-JobInfoHeader"]',
+    ],
+  },
+  'linkedin.com': {
+    company: [
+      '.job-details-jobs-unified-top-card__company-name',
+      '.topcard__flavor--bullet',
+      '.job-details-preferences-and-skills__company-name',
+      'a[href*="/company/"]',
+      '.topcard__org-name-link',
+    ],
+    role: [
+      '.job-details-jobs-unified-top-card__job-title',
+      '.topcard__title',
+      'h1[class*="title"]',
+      '.job-title',
+    ],
+    description: [
+      '.job-details-jobs-unified-top-card__description-container',
+      '.job-details__job-description',
+      '.show-more-less-html__markup',
+      'article.description',
+      '#job-details',
+    ],
+    isJobPage: [
+      '.job-details-jobs-unified-top-card',
+      '.job-view-layout',
+      '.jobs-details',
+    ],
+  },
+  'naukri.com': {
+    company: [
+      '.jd-header-title-company',
+      'a[class*="company"]',
+      '.companyInfo .companyName',
+      '[class*="company-name"]',
+      '.job-header-corp .company-name',
+    ],
+    role: [
+      '.jd-header-title',
+      'h1[class*="title"]',
+      '.job-header-corp h1',
+      '[class*="job-title"] h1',
+    ],
+    description: [
+      '.job-details-description',
+      '.jd-desc',
+      'div[class*="description"]',
+      '.job-description',
+      '.details-section',
+    ],
+    isJobPage: [
+      '.job-details-description',
+      '.jd-header-title',
+      '.job-header-corp',
+    ],
+  },
+};
+
+// ─── Messaging ──────────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'scrape') {
@@ -33,121 +119,364 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const result = scrapePage(request.options || {});
       sendResponse(result);
     } catch (err) {
-      sendResponse({ error: err.message, data: [] });
+      sendResponse({
+        error: err.message,
+        data: [],
+        pageType: 'error',
+        extractionLog: [`CRITICAL ERROR: ${err.message}`]
+      });
     }
   }
-  return true; // Keep channel open for async response
+  // Keep channel open for async response (though we're sync here)
+  return true;
 });
 
-// ─── Main scrape function ──────────────────────────────────────────────────
+// ─── Main ───────────────────────────────────────────────────────────────────
 
 function scrapePage(options = {}) {
   const { dedup = true, deepMode = true, cssSelectors = {} } = options;
+  const log = [];
   const seenFingerprints = new Set();
   const items = [];
+  const url = window.location.href;
+  const hostname = window.location.hostname;
 
-  console.log('[Job Scraper] Starting page analysis...');
-  console.log('[Job Scraper] URL:', window.location.href);
+  function logger(msg) {
+    console.log('[Job Scraper]', msg);
+    log.push(msg);
+  }
 
-  // Strategy 1: JSON-LD structured data (most reliable)
-  if (deepMode) {
-    const jsonldItems = extractJSONLD();
-    for (const item of jsonldItems) {
-      if (isValid(item, dedup, seenFingerprints)) {
+  logger(`=== Job Scraper Pro v2.0 ===`);
+  logger(`URL: ${url}`);
+  logger(`Hostname: ${hostname}`);
+
+  // ── Step 1: Detect page type ──────────────────────────────────────────
+  const pageType = detectPageType(hostname, logger);
+  logger(`Page type: ${pageType.type} (${pageType.reason})`);
+
+  // ── Step 2: If individual job page on known site, use site-specific extraction ──
+  if (pageType.type === 'job' && pageType.site) {
+    logger(`→ Site-specific extraction for "${pageType.site}"`);
+    const siteItems = extractFromJobPage(pageType.site, logger);
+    for (const item of siteItems) {
+      if (validateItem(item, dedup, seenFingerprints, logger)) {
         items.push(item);
       }
     }
-    console.log(`[Job Scraper] JSON-LD found ${jsonldItems.length} items`);
+    logger(`Site-specific: ${siteItems.length} items extracted`);
+
+    if (items.length > 0) {
+      logger(`✓ TOTAL: ${items.length} entries with real data`);
+      return buildResult(items, log, pageType);
+    }
   }
 
-  // Strategy 2: CSS Selectors (user-provided or auto-detected)
-  const selectorItems = extractViaSelectors(cssSelectors, dedup, seenFingerprints);
-  for (const item of selectorItems) {
-    if (isValid(item, dedup, seenFingerprints)) {
+  // ── Step 3: JSON-LD (ONLY JobPosting/Organization — skip ItemList) ────
+  if (deepMode) {
+    logger('Strategy 1/5: JSON-LD structured data...');
+    const jsonldRaw = extractJSONLD(logger);
+    const before = items.length;
+    for (const item of jsonldRaw) {
+      if (validateItem(item, dedup, seenFingerprints, logger)) {
+        items.push(item);
+      }
+    }
+    const added = items.length - before;
+    logger(`  JSON-LD: ${jsonldRaw.length} candidates → ${added} new`);
+  }
+
+  // ── Step 4: CSS Selectors ──────────────────────────────────────────────
+  logger('Strategy 2/5: CSS Selectors...');
+  const before2 = items.length;
+  const selRaw = extractViaSelectors(cssSelectors, seenFingerprints, logger);
+  for (const item of selRaw) {
+    if (validateItem(item, dedup, seenFingerprints, logger)) {
       items.push(item);
     }
   }
-  console.log(`[Job Scraper] Selectors found ${selectorItems.length} items`);
+  logger(`  Selectors: ${selRaw.length} candidates → ${items.length - before2} new`);
 
-  // Strategy 3: Tables (only if no data found yet or deep mode)
+  // ── Step 5: Tables ─────────────────────────────────────────────────────
   if (deepMode || items.length === 0) {
-    const tableItems = extractFromTables(dedup, seenFingerprints);
-    for (const item of tableItems) {
-      if (isValid(item, dedup, seenFingerprints)) {
+    logger('Strategy 3/5: HTML Tables...');
+    const before3 = items.length;
+    const tableRaw = extractFromTables(seenFingerprints, logger);
+    for (const item of tableRaw) {
+      if (validateItem(item, dedup, seenFingerprints, logger)) {
         items.push(item);
       }
     }
-    console.log(`[Job Scraper] Tables found ${tableItems.length} items`);
+    logger(`  Tables: ${tableRaw.length} candidates → ${items.length - before3} new`);
   }
 
-  // Strategy 4: Card/list patterns
+  // ── Step 6: Card/list patterns ─────────────────────────────────────────
   if (deepMode || items.length === 0) {
-    const cardItems = extractFromCards(cssSelectors, dedup, seenFingerprints);
-    for (const item of cardItems) {
-      if (isValid(item, dedup, seenFingerprints)) {
+    logger('Strategy 4/5: Card/List patterns...');
+    const before4 = items.length;
+    const cardRaw = extractFromCards(cssSelectors, seenFingerprints, logger);
+    for (const item of cardRaw) {
+      if (validateItem(item, dedup, seenFingerprints, logger)) {
         items.push(item);
       }
     }
-    console.log(`[Job Scraper] Cards found ${cardItems.length} items`);
+    logger(`  Cards: ${cardRaw.length} candidates → ${items.length - before4} new`);
   }
 
-  // Strategy 5: Text patterns (fallback)
+  // ── Step 7: Text patterns (last resort) ───────────────────────────────
   if (items.length === 0) {
-    const textItems = extractFromTextPatterns(dedup, seenFingerprints);
-    for (const item of textItems) {
-      if (isValid(item, dedup, seenFingerprints)) {
+    logger('Strategy 5/5: Text patterns (last resort)...');
+    const before5 = items.length;
+    const textRaw = extractFromTextPatterns(seenFingerprints, logger);
+    for (const item of textRaw) {
+      if (validateItem(item, dedup, seenFingerprints, logger)) {
         items.push(item);
       }
     }
-    console.log(`[Job Scraper] Text patterns found ${textItems.length} items`);
+    logger(`  Text: ${textRaw.length} candidates → ${items.length - before5} new`);
   }
 
-  console.log(`[Job Scraper] Total: ${items.length} entries found`);
-  return { data: items, count: items.length };
+  if (items.length === 0) {
+    logger('✗ NO DATA EXTRACTED — none of the 5 strategies found results');
+  } else {
+    logger(`✓ TOTAL: ${items.length} entries`);
+  }
+
+  return buildResult(items, log, pageType);
+}
+
+// ─── Build result object ────────────────────────────────────────────────────
+
+function buildResult(items, log, pageType) {
+  const result = {
+    data: items,
+    count: items.length,
+    pageType: pageType.type,
+    extractionLog: log,
+  };
+
+  // If it's a listing page, add a clear warning
+  if (pageType.type === 'listing') {
+    result.warning =
+      '⚠️ This page appears to be a search results / listing page, ' +
+      'not an individual job posting.\n\n' +
+      'For accurate results with company names and full descriptions:\n' +
+      '1. Click on any job title to open the individual job page\n' +
+      '2. Then click "Scrape This Page" again\n\n' +
+      'Tip: Individual job pages have the full description and company name visible.';
+  }
+
+  return result;
+}
+
+// ─── Page Type Detection ────────────────────────────────────────────────────
+
+function detectPageType(hostname, logger) {
+  const site = Object.keys(SITE_SELECTORS).find(s => hostname.includes(s));
+
+  if (site) {
+    const selectors = SITE_SELECTORS[site];
+
+    // Check if this is an individual job posting page
+    for (const sel of selectors.isJobPage) {
+      const el = document.querySelector(sel);
+      if (el) {
+        // Also verify there's a description container
+        const hasDesc = selectors.description.some(d => document.querySelector(d));
+        if (hasDesc) {
+          return { type: 'job', site, reason: `Individual job page: found "${sel}" + description` };
+        }
+        return { type: 'job', site, reason: `Individual job page: found "${sel}"` };
+      }
+    }
+
+    // Check for listing page indicators
+    const listingChecks = [
+      { label: 'search result cards', check: document.querySelectorAll('.job_seen_beacon, .jobsearch-SerpJobCard, .base-card, .job-card-container').length > 3 },
+      { label: 'pagination', check: !!document.querySelector('[class*="pagination"], [aria-label*="pagination"]') },
+      { label: 'search header', check: !!document.querySelector('[data-testid*="search"], [class*="search-header"], .jobsearch-ResultsList') },
+    ];
+
+    const matches = listingChecks.filter(c => c.check);
+    if (matches.length >= 2) {
+      return { type: 'listing', site, reason: `Listing page: ${matches.map(m => m.label).join(', ')}` };
+    }
+  }
+
+  // Generic listing detection (unknown sites)
+  const genericListingSignals = [
+    document.querySelectorAll('article').length > 5,
+    document.querySelectorAll('li > a[href*="job"], li > a[href*="career"]').length > 5,
+    document.querySelectorAll('[class*="pagination"]').length > 0,
+    document.querySelectorAll('[class*="result"], [class*="listing"]').length > 5,
+  ].filter(Boolean).length;
+
+  if (genericListingSignals >= 2) {
+    return { type: 'listing', site: null, reason: 'Generic listing patterns detected' };
+  }
+
+  return { type: 'unknown', site, reason: 'Could not determine page type' };
 }
 
 // ─── Validation ────────────────────────────────────────────────────────────
 
-function isValid(item, dedup, seenFingerprints) {
-  if (!item || !item.company || item.company.trim().length < 2) return false;
-  if (EXCLUDE_WORDS.has(item.company.toLowerCase().trim())) return false;
+function validateItem(item, dedup, seenFingerprints, logger) {
+  if (!item) {
+    logger('  ✗ REJECTED: null item');
+    return false;
+  }
+
+  const company = (item.company || '').trim();
+
+  // Reject obvious placeholders from failed extraction
+  if (!company || company.length < 2 || company.startsWith('[COMPANY_')) {
+    logger(`  ✗ REJECTED: no valid company name "${item.company}"`);
+    return false;
+  }
+
+  if (EXCLUDE_WORDS.has(company.toLowerCase())) {
+    logger(`  ✗ REJECTED: "${company}" is an excluded word`);
+    return false;
+  }
 
   if (dedup) {
-    const fp = (item.description || item.company).toLowerCase().trim().substring(0, 80);
-    if (seenFingerprints.has(fp)) return false;
+    const fp = ((item.description || '') + company + (item.role || ''))
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 120);
+    if (seenFingerprints.has(fp)) {
+      logger(`  • Duplicate skipped: "${company}"`);
+      return false;
+    }
     seenFingerprints.add(fp);
   }
+
   return true;
 }
 
 function looksLikeCompany(text) {
-  if (!text || text.length < 2) return false;
+  if (!text || typeof text !== 'string') return false;
   const t = text.trim();
+  if (t.length < 2) return false;
   const tl = t.toLowerCase();
 
-  // Check suffix
+  // Known company suffixes
   if (COMPANY_SUFFIXES.some(s => tl.includes(s))) return true;
 
-  // Check for 2+ capitalized words
+  // 2+ capitalized words
   const caps = (t.match(/[A-Z][a-z]+/g) || []).length;
   if (caps >= 2) return true;
 
-  // Single capitalized word of reasonable length
-  if (caps === 1 && t.length >= 4 && t.length <= 40) {
+  // Single capitalized word
+  if (caps === 1 && t.length >= 3 && t.length <= 40) {
     return !EXCLUDE_WORDS.has(tl);
   }
 
-  // All-caps words (like "TCS", "IBM", "HCL")
-  if (/^[A-Z]{2,5}$/.test(t)) return true;
+  // All-caps acronym (TCS, IBM, HCL, WIPRO, INFOSYS...)
+  if (/^[A-Z]{2,6}$/.test(t)) return true;
 
   return false;
 }
 
-// ─── Strategy 1: JSON-LD ──────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// SITE-SPECIFIC: Individual Job Page
+// ═════════════════════════════════════════════════════════════════════════════
 
-function extractJSONLD() {
+function extractFromJobPage(site, logger) {
+  const selectors = SITE_SELECTORS[site];
+  const items = [];
+
+  // ── Extract Company Name ─────────────────────────────────────────────
+  let company = '';
+  for (const sel of selectors.company) {
+    const el = document.querySelector(sel);
+    if (el) {
+      company = el.textContent.trim();
+      logger(`  Company selector "${sel}": "${company}"`);
+      if (company && company.length > 1) break;
+    } else {
+      logger(`  Company selector "${sel}": not found`);
+    }
+  }
+
+  if (!company) {
+    logger(`  ✗ COMPANY NAME NOT FOUND — tried ${selectors.company.length} selectors`);
+  }
+
+  // ── Extract Job Role ─────────────────────────────────────────────────
+  let role = '';
+  for (const sel of selectors.role) {
+    const el = document.querySelector(sel);
+    if (el) {
+      role = el.textContent.trim();
+      logger(`  Role selector "${sel}": "${role.substring(0, 80)}..."`);
+      if (role && role.length > 1) break;
+    } else {
+      logger(`  Role selector "${sel}": not found`);
+    }
+  }
+
+  if (!role) {
+    // Fallback: try <h1> as job title
+    const h1 = document.querySelector('h1');
+    if (h1) {
+      role = h1.textContent.trim();
+      logger(`  Role fallback <h1>: "${role.substring(0, 80)}..."`);
+    }
+  }
+
+  // ── Extract Job Description ──────────────────────────────────────────
+  let description = '';
+  for (const sel of selectors.description) {
+    const el = document.querySelector(sel);
+    if (el) {
+      description = (el.innerText || el.textContent || '').trim();
+      logger(`  Description selector "${sel}": ${description.length} chars`);
+      if (description && description.length > 20) break;
+    } else {
+      logger(`  Description selector "${sel}": not found`);
+    }
+  }
+
+  if (!description) {
+    logger(`  ✗ JOB DESCRIPTION NOT FOUND — tried ${selectors.description.length} selectors`);
+  }
+
+  // Clean up description - remove excessive whitespace
+  if (description) {
+    description = description.replace(/\s+/g, ' ').trim();
+  }
+
+  // Only add if we got something useful
+  if (company || role) {
+    const bullets = description ? extractBullets(description) : [];
+    logger(`  → Entry: company="${company || '[NOT FOUND]'}" role="${role || '[NOT FOUND]'}" ${bullets.length} bullets`);
+    items.push({
+      company: company || '[COMPANY_NOT_FOUND]',
+      role: role || '[ROLE_NOT_FOUND]',
+      description: description || '',
+      descriptionBullets: bullets,
+      source: `${site}-job-page`,
+    });
+  }
+
+  return items;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// STRATEGY 1: JSON-LD
+// ═════════════════════════════════════════════════════════════════════════════
+
+function extractJSONLD(logger) {
   const items = [];
   const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+
+  if (scripts.length === 0) {
+    logger('  No JSON-LD scripts found');
+    return items;
+  }
+
+  logger(`  Found ${scripts.length} JSON-LD script(s)`);
 
   for (const script of scripts) {
     try {
@@ -156,104 +485,133 @@ function extractJSONLD() {
 
       for (const item of data) {
         const type = item['@type'] || '';
-        let company = '';
-        let role = '';
-        let desc = '';
 
-        if (type && type.includes('JobPosting')) {
+        // ONLY process JobPosting and Organization — skip everything else
+        if (type.includes('JobPosting')) {
           const org = item.hiringOrganization || {};
-          company = typeof org === 'string' ? org : (org.name || '');
-          role = item.title || '';
-          desc = item.description || item.responsibilities || '';
-        } else if (['Organization', 'Corporation', 'Company', 'LocalBusiness'].includes(type)) {
-          company = item.name || '';
-          role = 'Company';
-        } else if (type === 'ItemList' || type === 'ListItem') {
-          const list = item.itemListElement || [];
-          for (const li of list) {
-            const liData = li.item || li;
-            if (liData.name) {
-              items.push({ company: liData.name, role: 'Listed Company', description: '', descriptionBullets: [] });
-            }
-          }
-          continue;
-        }
+          const company = typeof org === 'string' ? org : (org.name || '');
+          const role = item.title || '';
+          const desc = item.description || item.responsibilities || '';
 
-        if (company && role) {
-          items.push({
-            company,
-            role,
-            description: desc || '',
-            descriptionBullets: desc ? extractBullets(desc) : [],
-          });
+          if (company && role) {
+            logger(`  ✓ JobPosting: "${company}" — "${role}"`);
+            items.push({
+              company: company.trim(),
+              role: role.trim(),
+              description: (desc || '').trim(),
+              descriptionBullets: desc ? extractBullets(desc) : [],
+              source: 'jsonld-job',
+            });
+          } else {
+            logger(`  JobPosting SKIPPED (missing company or role)`);
+          }
+
+        } else if (['Organization', 'Corporation', 'Company', 'LocalBusiness'].includes(type)) {
+          const name = item.name || '';
+          if (name) {
+            logger(`  Organization: "${name}"`);
+            items.push({
+              company: name.trim(),
+              role: 'Company Profile',
+              description: item.description || '',
+              descriptionBullets: item.description ? extractBullets(item.description) : [],
+              source: 'jsonld-org',
+            });
+          }
+        } else {
+          // Explicitly skip ItemList, WebSite, BreadcrumbList, SearchAction, etc.
+          logger(`  SKIPPED JSON-LD type: "${type}" (not a job posting or organization)`);
         }
       }
-    } catch (e) { /* skip invalid JSON */ }
+    } catch (e) {
+      logger(`  JSON-LD parse error: ${e.message}`);
+    }
   }
+
   return items;
 }
 
-// ─── Strategy 2: CSS Selectors ────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// STRATEGY 2: CSS Selectors
+// ═════════════════════════════════════════════════════════════════════════════
 
-function extractViaSelectors(cssSelectors, dedup, seen) {
+function extractViaSelectors(cssSelectors, seen, logger) {
   const items = [];
 
-  // If user provided custom selectors, use them on the whole page
-  if (cssSelectors.company && cssSelectors.role) {
+  // User-provided custom selectors
+  if (cssSelectors.company && cssSelectors.company.length > 0) {
+    logger(`  Custom selectors: company="${cssSelectors.company}"`);
     const companyEls = document.querySelectorAll(cssSelectors.company);
     const roleEls = cssSelectors.role ? document.querySelectorAll(cssSelectors.role) : [];
     const descEls = cssSelectors.description ? document.querySelectorAll(cssSelectors.description) : [];
+
+    logger(`  Found ${companyEls.length} company, ${roleEls.length} role, ${descEls.length} desc elements`);
+
+    if (companyEls.length === 0) {
+      logger('  ✗ Custom company selector matched nothing!');
+      return items;
+    }
 
     const count = Math.max(companyEls.length, roleEls.length);
     for (let i = 0; i < count; i++) {
       const company = companyEls[i] ? companyEls[i].textContent.trim() : '';
       const role = roleEls[i] ? roleEls[i].textContent.trim() : '';
       const desc = descEls[i] ? descEls[i].textContent.trim() : '';
-      if (company) {
-        items.push({ company, role: role || 'Listed Entry', description: desc, descriptionBullets: desc ? extractBullets(desc) : [] });
+
+      if (company && company.length > 1) {
+        items.push({
+          company,
+          role: role || '[ROLE_NOT_FOUND]',
+          description: desc || '',
+          descriptionBullets: desc ? extractBullets(desc) : [],
+          source: 'custom-css',
+        });
       }
     }
     return items;
   }
 
-  // Auto-detect common company patterns
-  // Look for tables/listings by common class names
+  // Auto-detect selectors
+  logger('  Auto-detecting company links via common patterns...');
   const commonSelectors = [
     'a[href*="/company/"]', 'a[href*="/companies/"]',
     '[class*="company-name"]', '[class*="companyName"]',
     '[class*="org-name"]', '[class*="orgName"]',
-    'h3[class*="title"]', 'h4[class*="title"]',
-    'a[data-company]', '[data-company-name]',
+    '[data-company]', '[data-company-name]',
     '.employer', '.employer-name',
   ];
 
   for (const sel of commonSelectors) {
     const els = document.querySelectorAll(sel);
-    if (els.length > 2) {
+    if (els.length >= 2) {
+      logger(`  Found ${els.length} elements matching "${sel}"`);
       for (const el of els) {
         const text = el.textContent.trim();
         if (text && looksLikeCompany(text)) {
-          // Try to find a nearby job title
           const parent = el.closest('li, div, article, tr') || el.parentElement;
           const nearbyTitle = findJobTitleNearby(parent, el);
           items.push({
             company: text,
-            role: nearbyTitle || 'Listed Entry',
+            role: nearbyTitle || '[ROLE_NOT_FOUND]',
             description: '',
             descriptionBullets: [],
+            source: 'auto-css',
           });
         }
       }
-      if (items.length > 0) break;
+      if (items.length > 0) {
+        logger(`  Auto-selectors: ${items.length} entries found`);
+        break;
+      }
+    } else {
+      logger(`  "${sel}": only ${els.length} match(es) — need ≥2`);
     }
   }
-
   return items;
 }
 
 function findJobTitleNearby(parent, excludeEl) {
   if (!parent) return '';
-  // Look for common job title elements
   const selectors = [
     'h2', 'h3', 'h4', 'a[class*="title"]', 'a[class*="job"]',
     '[class*="job-title"]', '[class*="jobTitle"]', '[class*="position"]',
@@ -268,7 +626,6 @@ function findJobTitleNearby(parent, excludeEl) {
       }
     }
   }
-  // Try all links
   const links = parent.querySelectorAll('a');
   for (const link of links) {
     if (link !== excludeEl) {
@@ -281,18 +638,27 @@ function findJobTitleNearby(parent, excludeEl) {
   return '';
 }
 
-// ─── Strategy 3: Tables ───────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// STRATEGY 3: Tables
+// ═════════════════════════════════════════════════════════════════════════════
 
-function extractFromTables(dedup, seen) {
+function extractFromTables(seen, logger) {
   const items = [];
   const tables = document.querySelectorAll('table');
-  if (tables.length === 0) return items;
+  if (tables.length === 0) {
+    logger('  No tables found');
+    return items;
+  }
+
+  logger(`  Found ${tables.length} table(s)`);
 
   for (const table of tables) {
     const rows = table.querySelectorAll('tr');
-    if (rows.length < 2) continue;
+    if (rows.length < 2) {
+      logger('  Table with <2 rows, skipping');
+      continue;
+    }
 
-    // Detect columns from headers
     const headerCells = rows[0].querySelectorAll('th, td');
     const headers = Array.from(headerCells).map(th => th.textContent.trim().toLowerCase());
 
@@ -303,16 +669,15 @@ function extractFromTables(dedup, seen) {
       if (/description|details|info|about/.test(h)) descIdx = i;
     });
 
-    // Auto-detect company column from first data row
     if (companyIdx === -1 && rows.length > 1) {
       const cells = rows[1].querySelectorAll('td');
       cells.forEach((cell, i) => {
-        const text = cell.textContent.trim();
-        if (looksLikeCompany(text)) companyIdx = i;
+        if (looksLikeCompany(cell.textContent.trim())) companyIdx = i;
       });
     }
 
-    // Extract data
+    logger(`  Table columns — company:${companyIdx} role:${roleIdx} desc:${descIdx}`);
+
     for (let r = 1; r < rows.length; r++) {
       const cells = rows[r].querySelectorAll('td');
       if (cells.length === 0) continue;
@@ -328,24 +693,38 @@ function extractFromTables(dedup, seen) {
       if (descIdx >= 0 && descIdx < cells.length) desc = cells[descIdx].textContent.trim();
 
       if (company) {
-        items.push({ company, role: role || 'Listed Entry', description: desc, descriptionBullets: desc ? extractBullets(desc) : [] });
+        items.push({
+          company,
+          role: role || '[ROLE_NOT_FOUND]',
+          description: desc || '',
+          descriptionBullets: desc ? extractBullets(desc) : [],
+          source: 'table',
+        });
       }
     }
   }
   return items;
 }
 
-// ─── Strategy 4: Cards/Listings ────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// STRATEGY 4: Cards / Listings
+// ═════════════════════════════════════════════════════════════════════════════
 
-function extractFromCards(cssSelectors, dedup, seen) {
+function extractFromCards(cssSelectors, seen, logger) {
   const items = [];
 
   const cardSelectors = [
-    'article', 'div[class*="card"]', 'div[class*="list-item"]',
-    'div[class*="result"]', 'li[class*="list"]', 'div[class*="company"]',
-    'div[class*="job"]', 'div[class*="tuple"]', 'div[class*="row"]',
-    'div[class*="listing"]', 'section[class*="card"]',
-    'div[data-company]', 'div[data-job]', 'li[class*="job"]',
+    'article',
+    'div[class*="card"]',
+    'div[class*="list-item"]',
+    'div[class*="result"]',
+    'li[class*="list"]',
+    'div[class*="company"]',
+    'div[class*="job"]',
+    'div[class*="listing"]',
+    'section[class*="card"]',
+    'div[data-company]',
+    'li[class*="job"]',
   ];
 
   let cards = [];
@@ -353,11 +732,15 @@ function extractFromCards(cssSelectors, dedup, seen) {
     const found = document.querySelectorAll(sel);
     if (found.length > 1 && found.length < 200) {
       cards = found;
+      logger(`  Using "${sel}" — ${cards.length} card(s) found`);
       break;
     }
   }
 
-  if (cards.length === 0) return items;
+  if (cards.length === 0) {
+    logger('  No card containers found');
+    return items;
+  }
 
   for (const card of cards) {
     try {
@@ -378,50 +761,65 @@ function extractFromCards(cssSelectors, dedup, seen) {
       }
 
       if (company && role) {
-        items.push({ company, role, description: desc, descriptionBullets: desc ? extractBullets(desc) : [] });
+        items.push({
+          company,
+          role,
+          description: desc || '',
+          descriptionBullets: desc ? extractBullets(desc) : [],
+          source: 'card',
+        });
         continue;
       }
 
-      // Auto-detect: find company-like text and role-like text
+      // Auto-detect within card
       const allLinks = card.querySelectorAll('a, strong, h2, h3, h4');
       const texts = Array.from(allLinks)
         .map(el => el.textContent.trim())
         .filter(t => t.length > 1);
 
       for (const t of texts) {
-        if (!company && looksLikeCompany(t)) company = t;
-        else if (!role && !looksLikeCompany(t) && t.length < 200) role = t;
-      }
-
-      if (!company) {
-        // Try first link/text as company
-        const firstLink = card.querySelector('a');
-        if (firstLink) {
-          const t = firstLink.textContent.trim();
-          if (t.length > 1) company = t;
+        if (!company && looksLikeCompany(t)) {
+          company = t;
+        } else if (!role && !looksLikeCompany(t) && t.length < 200) {
+          role = t;
         }
       }
 
-      // Look for description
+      if (!company) {
+        const firstLink = card.querySelector('a');
+        if (firstLink) {
+          const t = firstLink.textContent.trim();
+          if (t.length > 1 && !EXCLUDE_WORDS.has(t.toLowerCase())) company = t;
+        }
+      }
+
       const descEl = card.querySelector('p, div[class*="desc"], div[class*="summary"]');
       if (descEl) desc = descEl.textContent.trim();
 
-      if (company) {
-        items.push({ company, role: role || 'Listed Entry', description: desc, descriptionBullets: desc ? extractBullets(desc) : [] });
+      if (company && company.length > 1 && !EXCLUDE_WORDS.has(company.toLowerCase())) {
+        items.push({
+          company,
+          role: role || '[ROLE_NOT_FOUND]',
+          description: desc || '',
+          descriptionBullets: desc ? extractBullets(desc) : [],
+          source: 'card',
+        });
       }
-    } catch (e) { /* skip card */ }
+    } catch (e) {
+      logger(`  Card error: ${e.message}`);
+    }
   }
   return items;
 }
 
-// ─── Strategy 5: Text Patterns ─────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// STRATEGY 5: Text Patterns
+// ═════════════════════════════════════════════════════════════════════════════
 
-function extractFromTextPatterns(dedup, seen) {
+function extractFromTextPatterns(seen, logger) {
   const items = [];
-  // Limit to first 50KB for performance on large pages
   const bodyText = document.body.innerText.substring(0, 50000);
 
-  // Find company names with known suffixes
   const pattern = new RegExp(
     `([A-Z][A-Za-z0-9\\s&.-]{1,40}?)(${COMPANY_SUFFIXES.join('|')})`,
     'gi'
@@ -429,33 +827,51 @@ function extractFromTextPatterns(dedup, seen) {
 
   let match;
   const foundCompanies = new Set();
+  let count = 0;
+
   while ((match = pattern.exec(bodyText)) !== null) {
     const company = match[0].trim();
     if (company.length > 2 && !EXCLUDE_WORDS.has(company.toLowerCase())) {
-      // Try to find a job title near this match
-      const context = bodyText.substring(
-        Math.max(0, match.index - 100),
-        Math.min(bodyText.length, match.index + 200)
+      const contextStart = Math.max(0, match.index - 100);
+      const contextEnd = Math.min(bodyText.length, match.index + 200);
+      const context = bodyText.substring(contextStart, contextEnd);
+
+      const titleMatch = context.match(
+        /(?:hiring|looking for|seeking|position|role|job)[:\s]+([A-Z][A-Za-z\s/]+?)(?:\n|\.|,)/i
       );
-      const titleMatch = context.match(/(?:hiring|looking for|seeking|position|role|job)[:\s]+([A-Z][A-Za-z\s/]+?)(?:\n|\.|,)/i);
-      const role = titleMatch ? titleMatch[1].trim() : '';
+      const role = titleMatch ? titleMatch[1].trim() : '[ROLE_NOT_FOUND]';
 
       if (!foundCompanies.has(company)) {
         foundCompanies.add(company);
-        items.push({ company, role: role || 'Listed Entry', description: '', descriptionBullets: [] });
+        count++;
+        items.push({
+          company,
+          role,
+          description: '',
+          descriptionBullets: [],
+          source: 'text-pattern',
+        });
       }
     }
   }
+
+  logger(`  Found ${count} unique company name(s) via text patterns`);
   return items;
 }
 
-// ─── Bullet point extraction ───────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// Bullet Point Extraction
+// ═════════════════════════════════════════════════════════════════════════════
 
 function extractBullets(text) {
-  if (!text) return [];
-  const lines = text.split(/[•·●◆◇▪▸▹►▻‣⁃⦿✦✧\-]\s*|\n+|(?:\d+[.)])\s*/);
+  if (!text || text.length < 20) return [];
+
+  // Strip HTML tags first
+  const cleaned = text.replace(/<[^>]*>/g, '\n');
+  // Split on bullet chars, newlines, or numbered lists
+  const lines = cleaned.split(/[•·●◆◇▪▸▹►▻‣⁃⦿✦✧\-]\s*|[\n\r]+|(?:\d+[.)])\s*/);
   return lines
-    .map(l => l.trim())
+    .map(l => l.replace(/\s+/g, ' ').trim())
     .filter(l => l.length > 10)
     .slice(0, 50);
 }

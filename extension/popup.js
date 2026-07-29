@@ -1,13 +1,17 @@
 /**
- * Job Scraper Pro - Chrome Extension Popup Logic
- * Handles user interaction, scraping, and Excel generation
+ * Job Scraper Pro - Chrome Extension Popup Logic v2.0
+ * Handles user interaction, scraping, Excel generation, warnings & logs
  */
 
 // State
 let scrapedData = [];
+let extractionLog = [];
 
 // DOM elements
 const pageUrl = document.getElementById('pageUrl');
+const pageTypeTag = document.getElementById('pageTypeTag');
+const warningBanner = document.getElementById('warningBanner');
+const warningText = document.getElementById('warningText');
 const scrapeBtn = document.getElementById('scrapeBtn');
 const statusArea = document.getElementById('statusArea');
 const resultsArea = document.getElementById('resultsArea');
@@ -21,10 +25,12 @@ const selectorOptions = document.getElementById('selectorOptions');
 const cssCompany = document.getElementById('cssCompany');
 const cssRole = document.getElementById('cssRole');
 const cssDesc = document.getElementById('cssDesc');
+const logViewer = document.getElementById('logViewer');
+const logToggle = document.getElementById('logToggle');
+const logContent = document.getElementById('logContent');
 
 // ─── Initialize ──────────────────────────────────────────────────────────
 
-// Get current tab URL
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const tab = tabs[0];
   if (tab && tab.url) {
@@ -52,6 +58,11 @@ function showStatus(message, type = 'loading', details = '') {
     if (details) {
       html += `<br><small style="color:#666;">${details}</small>`;
     }
+  } else if (type === 'warning') {
+    html = `⚠️ ${message}`;
+    if (details) {
+      html += `<br><small style="color:#666;">${details}</small>`;
+    }
   }
   statusArea.innerHTML = html;
   statusArea.style.display = 'block';
@@ -61,6 +72,47 @@ function hideStatus() {
   statusArea.style.display = 'none';
 }
 
+// ─── Page type tag ───────────────────────────────────────────────────────
+
+function setPageTypeTag(type) {
+  pageTypeTag.style.display = 'inline-block';
+  pageTypeTag.className = `page-type-tag ${type}`;
+  const labels = { job: '📄 Job Page', listing: '📋 Listing Page', unknown: '❓ Unknown' };
+  pageTypeTag.textContent = labels[type] || type;
+}
+
+// ─── Warning banner ──────────────────────────────────────────────────────
+
+function showWarning(message) {
+  warningText.textContent = message;
+  warningBanner.classList.add('show');
+}
+
+function hideWarning() {
+  warningBanner.classList.remove('show');
+}
+
+// ─── Log viewer ──────────────────────────────────────────────────────────
+
+function showLog(log) {
+  extractionLog = log || [];
+  logViewer.classList.add('show');
+  logContent.textContent = extractionLog.join('\n');
+}
+
+function hideLog() {
+  logViewer.classList.remove('show');
+  logContent.textContent = '';
+}
+
+logToggle.addEventListener('click', () => {
+  const isVisible = logContent.classList.contains('show');
+  logContent.classList.toggle('show');
+  logToggle.textContent = isVisible
+    ? '📋 Show extraction log'
+    : '📋 Hide extraction log';
+});
+
 // ─── Generate Excel ──────────────────────────────────────────────────────
 
 function generateExcel(data) {
@@ -69,7 +121,6 @@ function generateExcel(data) {
     return;
   }
 
-  // Format data for Excel
   const rows = [['S.No', 'Company Name', 'Job Role', 'Job Description', 'Source']];
   data.forEach((item, idx) => {
     const bullets = item.descriptionBullets && item.descriptionBullets.length > 0
@@ -84,11 +135,9 @@ function generateExcel(data) {
     ]);
   });
 
-  // Create workbook
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(rows);
 
-  // Set column widths
   ws['!cols'] = [
     { wch: 6 },   // S.No
     { wch: 30 },  // Company
@@ -98,8 +147,7 @@ function generateExcel(data) {
   ];
 
   XLSX.utils.book_append_sheet(wb, ws, 'Job Listings');
-  
-  // Generate and download
+
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
   const filename = `jobs_scraped_${timestamp}.xlsx`;
   XLSX.writeFile(wb, filename);
@@ -111,20 +159,20 @@ function generateExcel(data) {
 
 async function scrapePage() {
   hideStatus();
+  hideWarning();
+  hideLog();
   resultsArea.style.display = 'none';
   scrapedData = [];
 
   try {
     showStatus('Analyzing page content...', 'loading');
-    
-    // Get current tab
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || !tab.id) {
       showStatus('Could not access this page', 'error');
       return;
     }
 
-    // Check if we can access this page
     if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://')) {
       showStatus(
         'Cannot scrape browser internal pages',
@@ -134,9 +182,8 @@ async function scrapePage() {
       return;
     }
 
-    // Send scrape request to content script
     showStatus('Scanning page DOM for company/job data...', 'loading');
-    
+
     const result = await chrome.tabs.sendMessage(tab.id, {
       action: 'scrape',
       options: {
@@ -159,13 +206,30 @@ async function scrapePage() {
       return;
     }
 
+    // Show page type tag
+    if (result.pageType) {
+      setPageTypeTag(result.pageType);
+    }
+
+    // Show extraction log (always available)
+    if (result.extractionLog && result.extractionLog.length > 0) {
+      showLog(result.extractionLog);
+    }
+
+    // Show warning if listing page
+    if (result.warning) {
+      showWarning(result.warning);
+    }
+
     scrapedData = result.data || [];
 
     if (scrapedData.length === 0) {
       showStatus(
         'No company/job data found',
         'error',
-        'This page may not contain company or job listings. Try navigating to a company directory or job search page.'
+        !result.warning
+          ? 'This page may not contain company or job listings.'
+          : 'This appears to be a listing page. Try opening an individual job posting.'
       );
       return;
     }
@@ -173,14 +237,27 @@ async function scrapePage() {
     // Show results
     resultCount.textContent = scrapedData.length;
     resultsArea.style.display = 'block';
-    
-    showStatus(
-      `Found ${scrapedData.length} entries!`,
-      'success'
+
+    // Check if data has placeholders
+    const hasPlaceholders = scrapedData.some(
+      d => (d.company || '').startsWith('[COMPANY_') || (d.role || '').startsWith('[ROLE_')
     );
 
+    if (hasPlaceholders) {
+      showStatus(
+        `Found ${scrapedData.length} entries (with some missing data)`,
+        'warning',
+        'Some fields could not be extracted. Check the extraction log for details.'
+      );
+    } else {
+      showStatus(
+        `Found ${scrapedData.length} entries!`,
+        'success'
+      );
+    }
+
     // Auto-download if enabled
-    if (autoDownload.checked) {
+    if (autoDownload.checked && scrapedData.length > 0) {
       try {
         const filename = generateExcel(scrapedData);
         showStatus(
@@ -191,7 +268,7 @@ async function scrapePage() {
       } catch (err) {
         showStatus(
           'Data extracted! Click "Download Excel" to save.',
-          'success'
+          hasPlaceholders ? 'warning' : 'success'
         );
       }
     }
