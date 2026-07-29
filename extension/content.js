@@ -296,10 +296,23 @@ function detectPageType(hostname, logger) {
 
     // Check for listing page indicators
     const listingChecks = [
-      { label: 'search result cards', check: document.querySelectorAll('.job_seen_beacon, .jobsearch-SerpJobCard, .base-card, .job-card-container').length > 3 },
+      { label: 'search result cards', check: document.querySelectorAll('.job_seen_beacon, .jobsearch-SerpJobCard, .base-card, .job-card-container, div[class*="jobTuple"], .job-tuple, .srp-jobtuple-wrapper, [class*="srp-"], div[class*="listings"]').length > 3 },
       { label: 'pagination', check: !!document.querySelector('[class*="pagination"], [aria-label*="pagination"]') },
-      { label: 'search header', check: !!document.querySelector('[data-testid*="search"], [class*="search-header"], .jobsearch-ResultsList') },
+      { label: 'search header', check: !!document.querySelector('[data-testid*="search"], [class*="search-header"], .jobsearch-ResultsList, [class*="search-result"], [class*="srp-"]') },
     ];
+
+    // Naukri-specific listing detection (more relaxed)
+    if (hostname.includes('naukri.com')) {
+      const naukriListingSignals = [
+        document.querySelectorAll('div[class*="jobTuple"], .job-tuple').length >= 2,
+        document.querySelectorAll('a[href*="/job-listings"]').length >= 2,
+        document.querySelectorAll('a[href*="/ai-jobs"], a[href*="-jobs"]').length >= 3,
+        !!document.querySelector('[class*="search-result"], [class*="srp"]'),
+      ].filter(Boolean).length;
+      if (naukriListingSignals >= 2) {
+        return { type: 'listing', site, reason: `Naukri listing page: ${naukriListingSignals}/4 signals` };
+      }
+    }
 
     const matches = listingChecks.filter(c => c.check);
     if (matches.length >= 2) {
@@ -883,6 +896,10 @@ function extractJobLinks() {
     links.push({ url: url, company: company || '', role: role || '' });
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // METHOD A: Site-specific selectors
+  // ══════════════════════════════════════════════════════════════════════
+
   if (hostname.includes('indeed.com')) {
     // Indeed: each job card has a link with data-jk or href containing jk=
     document.querySelectorAll('.job_seen_beacon, .jobsearch-SerpJobCard, [data-testid="job-card"]').forEach(card => {
@@ -903,27 +920,141 @@ function extractJobLinks() {
       if (url) addLink(url, company.trim(), role.trim());
     });
   } else if (hostname.includes('naukri.com')) {
-    // Naukri: job cards
-    document.querySelectorAll('.job-card-container, .job-list-card, article, li[class*="job"]').forEach(card => {
-      const linkEl = card.querySelector('a[href*="/job-listings"], a[href*="job-details"], a.title, a[class*="title"]');
-      const url = linkEl ? linkEl.href : '';
-      const company = (card.querySelector('.company-name, .comp-name, .subTitle, [class*="company"]') || {}).textContent || '';
-      const role = (card.querySelector('.title, a.title, [class*="title"] a') || {}).textContent || (linkEl ? linkEl.textContent : '');
-      if (url) addLink(url, company.trim(), role.trim());
-    });
+    // Naukri: try multiple card container selectors
+    const naukriCardSelectors = [
+      'div[class*="jobTuple"]', '.job-tuple', 'section[class*="job"]',
+      'div[class*="srp-job"]', '.job-card-container', '.job-list-card',
+      'article[data-*]', 'li[class*="job"]', 'article'
+    ];
+    let naukriCards = [];
+    for (const sel of naukriCardSelectors) {
+      const found = document.querySelectorAll(sel);
+      if (found.length >= 2 && found.length < 300) {
+        naukriCards = found;
+        break;
+      }
+    }
+
+    if (naukriCards.length > 0) {
+      naukriCards.forEach(card => {
+        // Try all possible job link patterns
+        const linkEl = card.querySelector(
+          'a[href*="/job-listings"], a[href*="job-details"], a[href*="-job-"], ' +
+          'a[href*="jobs"], a[class*="title"], a.title, ' +
+          'a[href*="/ai-jobs"], a[href*="/software"], a[href*="/engineer"]'
+        );
+        const url = linkEl ? linkEl.href : '';
+        // Try all possible company name patterns
+        const companyEl = card.querySelector(
+          '.company-name, .comp-name, .comp-dtls, .subTitle, ' +
+          '[class*="company"], [class*="org"], [class*="employer"]'
+        );
+        const company = companyEl ? companyEl.textContent.trim() : '';
+        // Try all possible role/title patterns
+        const roleEl = linkEl || card.querySelector(
+          '.title, a.title, [class*="title"] a, h2, h3, ' +
+          'a[class*="title"], [class*="job-title"]'
+        );
+        const role = roleEl ? roleEl.textContent.trim() : '';
+        if (url) addLink(url, company.trim(), role.trim());
+      });
+    }
   } else {
     // Generic: look for job-like links inside card-like containers
-    const cardSelectors = ['article', 'li[class*="job"]', 'div[class*="job-card"]', 'div[class*="result"]', 'div[class*="listing"]'];
+    const cardSelectors = ['article', 'li[class*="job"]', 'div[class*="job-card"]', 'div[class*="result"]', 'div[class*="listing"]', 'div[class*="card"]', 'div[class*="tuple"]', 'section[class*="result"]'];
     for (const sel of cardSelectors) {
       const cards = document.querySelectorAll(sel);
       for (const card of cards) {
         const a = card.querySelector('a[href]');
         if (a && (/job|career|position|vacancy/i.test(a.href) || /job|career|position|vacancy/i.test(a.textContent))) {
-          const company = (card.querySelector('[class*="company"], [class*="org"]') || {}).textContent || '';
+          const company = (card.querySelector('[class*="company"], [class*="org"], [class*="employer"]') || {}).textContent || '';
           const role = a.textContent || '';
           addLink(a.href, company.trim(), role.trim());
         }
       }
+      if (links.length > 0) break;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // METHOD B: Global link scan — find ALL job-like links on the page
+  // ══════════════════════════════════════════════════════════════════════
+  if (links.length === 0) {
+    // Scan every single <a> tag on the page for job-like URL patterns
+    const allLinks = document.querySelectorAll('a[href]');
+    const jobUrlPatterns = [/\/job/i, /\/career/i, /\/vacancy/i, /\-job\-/, /\/position/, /\/listing/i, /\/opening/i];
+    const seenHrefs = new Set();
+
+    for (const a of allLinks) {
+      const href = a.href;
+      if (!href || seenHrefs.has(href)) continue;
+      seenHrefs.add(href);
+
+      // Check if URL looks like a job listing
+      const isJobLink = jobUrlPatterns.some(p => p.test(href));
+      if (isJobLink) {
+        const text = a.textContent.trim();
+        if (text && text.length > 2 && text.length < 200) {
+          // Try to find company name from parent elements
+          let company = '';
+          let parent = a.parentElement;
+          for (let i = 0; i < 5 && parent; i++) {
+            // Look for company-like text in siblings and nearby elements
+            const nearby = parent.querySelectorAll('[class*="company"], [class*="org"], [class*="employer"], [class*="comp"]');
+            for (const el of nearby) {
+              const t = el.textContent.trim();
+              if (t && t.length > 1 && t.length < 100 && !text.includes(t)) {
+                company = t;
+                break;
+              }
+            }
+            if (company) break;
+            parent = parent.parentElement;
+          }
+          addLink(href, company.trim(), text);
+        }
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // METHOD C: Try looking for Naukri-specific structured data fallback
+  // ══════════════════════════════════════════════════════════════════════
+  if (links.length === 0 && hostname.includes('naukri.com')) {
+    // On Naukri, job cards may use data attributes
+    document.querySelectorAll('[data-job-id], [data-company-id], [id*="job_"]').forEach(el => {
+      // Find the nearest job link
+      const link = el.querySelector('a[href]') || el.closest('a[href]');
+      if (link && link.href && !seenUrls.has(link.href) && /job|career/i.test(link.href)) {
+        const company = (el.querySelector('[class*="company"], [class*="comp"], [class*="org"]') || {}).textContent || '';
+        const role = link.textContent.trim();
+        addLink(link.href, company.trim(), role);
+      }
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // METHOD D: Last resort — JSON-LD (already processed in scrapePage,
+  // but page might have ItemList with job URLs we can use)
+  // ══════════════════════════════════════════════════════════════════════
+  if (links.length === 0) {
+    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (const script of scripts) {
+      try {
+        let data = JSON.parse(script.textContent);
+        if (!Array.isArray(data)) data = [data];
+        for (const item of data) {
+          if (item['@type'] === 'ItemList' && item.itemListElement) {
+            for (const element of item.itemListElement) {
+              const url = element.url || (element.item && element.item.url);
+              if (url) {
+                const name = element.name || (element.item && element.item.name) || '';
+                addLink(url, '', name);
+              }
+            }
+          }
+        }
+      } catch(e) {}
       if (links.length > 0) break;
     }
   }
