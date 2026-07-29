@@ -248,65 +248,59 @@ class NaukriScraper:
         """Extract all individual job URLs from a Naukri listing page."""
         links = []
         seen_urls = set()
+        self.log("  Scanning for job links...")
 
-        card_selectors = [
-            'div[class*="jobTuple"]', '.job-tuple', 'article',
-            'div[class*="card"]', 'section[class*="job"]',
-            'div[class*="srp"]', 'div[class*="list"]',
-        ]
-        cards = []
-        for sel in card_selectors:
-            found = page.css(sel)
-            if found and len(found) >= 2:
-                cards = found
-                self.log(f"  [OK] Found {len(cards)} cards via '{sel}'")
-                break
+        # ── Primary: Direct job link detection ────────────────
+        # Naukri job URLs follow: /job-listings-{slug}-{id}
+        job_link_els = page.css('a[href*="job-listings"]')
+        if job_link_els:
+            self.log(f"  [OK] Found {len(job_link_els)} direct job links")
+            for link in job_link_els:
+                try:
+                    href = link.attrib.get('href', '')
+                    if not href:
+                        continue
+                    if href.startswith('/'):
+                        href = 'https://www.naukri.com' + href
+                    if href in seen_urls:
+                        continue
+                    seen_urls.add(href)
+                    title = (self._sel_text(link) or '').strip()
+                    if len(title) < 2:
+                        continue
+                    links.append({'url': href, 'company': '', 'title': title[:120]})
+                except Exception:
+                    continue
 
-        if not cards:
-            # Fallback: scan all links
-            all_links = page.css('a[href]')
-            for link in all_links:
+        if links:
+            self.log(f"  [OK] Extracted {len(links)} job links")
+            return links
+
+        # ── Tertiary: Fallback with score_job_url ─────────────
+        self.log("  [!] Direct job links not found, scanning all links with URL scoring...")
+        all_links = page.css('a[href]')
+        for link in all_links:
+            try:
                 href = link.attrib.get('href', '')
                 if not href or href.startswith('#') or href.startswith('javascript:'):
                     continue
                 if href.startswith('/'):
                     href = 'https://www.naukri.com' + href
-                if score_job_url(href) >= 2 and href not in seen_urls:
+                s = score_job_url(href)
+                if s >= 2 and href not in seen_urls:
                     seen_urls.add(href)
-                    links.append({'url': href, 'company': '', 'title': (self._sel_text(link) or '')[:120]})
-            self.log(f"  [OK] Fallback scan: {len(links)} links")
-            return links
-
-        for card in cards:
-            try:
-                card_links = card.css('a[href]')
-                best_link, best_score = None, -1
-                for cl in card_links:
-                    href = cl.attrib.get('href', '')
-                    if not href:
+                    title = (self._sel_text(link) or '').strip()
+                    if len(title) < 3:
                         continue
-                    if href.startswith('/'):
-                        href = 'https://www.naukri.com' + href
-                    s = score_job_url(href)
-                    if s > best_score:
-                        best_score, best_link = s, (href, cl)
-                if not best_link or best_score < 2 or best_link[0] in seen_urls:
-                    continue
-                url, link_el = best_link
-                seen_urls.add(url)
-                company_els = card.css('[class*="company"], [class*="org"]')
-                company = self._sel_text(company_els[0]) if company_els else ''
-                title = self._sel_text(link_el) or ''
-                title_lower = title.lower()
-                if any(w in title_lower for w in ['view all', 'register', 'career advice',
-                                                    'help center', 'interview', 'resume tips',
-                                                    'salary', 'recommended', 'filter']):
-                    continue
-                links.append({'url': url, 'company': company[:80], 'title': title[:120]})
+                    if any(w in title.lower() for w in ['view all', 'register', 'career',
+                                                          'help center', 'interview', 'resume',
+                                                          'salary', 'recommended', 'filter',
+                                                          'review', 'rating']):
+                        continue
+                    links.append({'url': href, 'company': '', 'title': title[:120]})
             except Exception:
                 continue
-
-        self.log(f"  [OK] Extracted {len(links)} job links")
+        self.log(f"  [OK] Fallback link scan: {len(links)} job links")
         return links
 
     # ── Individual Job Page ──────────────────────────────────────────
