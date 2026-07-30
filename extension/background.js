@@ -120,11 +120,19 @@ async function startBatchScrape(urls) {
         continue;
       }
 
-      // Extra wait for dynamic content (JS-rendered job pages)
-      await delay(2000);
+      // Wait for JS rendering (Naukri is JS-heavy). 5s to ensure full render.
+      await delay(5000);
 
       // Send scrape message to the tab's content script
       let result = await sendMessageToTab(tab.id, { action: 'scrape', options: { dedup: true, deepMode: true } });
+
+      // Check if description was extracted; if not, wait 3s more and retry
+      const hasDesc = result && result.data && result.data[0] && result.data[0].description && result.data[0].description.length > 100;
+      if (!hasDesc && result && !result.error) {
+        console.log(`[Batch] [${i + 1}/${validUrls.length}] Description too short, waiting 4s for retry...`);
+        await delay(4000);
+        result = await sendMessageToTab(tab.id, { action: 'scrape', options: { dedup: true, deepMode: true } });
+      }
 
       if (result && result.data && result.data.length > 0) {
         const item = result.data[0];

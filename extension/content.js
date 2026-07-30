@@ -156,7 +156,8 @@ const SITE = {
       log.push(role ? `Role: "${role.substring(0, 80)}"` : 'Role: NOT FOUND');
 
       // ── Job Description (the full text!) ──
-      let description = find([
+      // Strategy A: Try CSS selectors for targeted extraction
+      let cssDescription = find([
         '.job-details-description',           // Naukri class
         'div[class*="jd-desc"]',              // Naukri description
         'div[class*="description"]',          // Generic
@@ -172,40 +173,61 @@ const SITE = {
         '[class*="jd-section"]',              // Naukri sections
         'div[class*="styles_jd"]',            // Naukri CSS-modules pattern
       ]);
+      log.push(cssDescription ? `  CSS description: ${cssDescription.length} chars` : '  CSS description: none');
 
-      // ── If selectors failed, use page-text fallback ──
-      if (!description || description.length < 30) {
-        log.push('Description selectors failed — trying page-text fallback...');
+      // Strategy B: ALWAYS run page-text fallback (regardless of CSS result)
+      // This ensures we get text even if CSS selectors match the wrong element
+      let fallbackDescription = '';
+      log.push('  Running page-text fallback...');
 
-        // Strategy 1: Grab text from <main> or <article>
-        const mainArea = document.querySelector('main, article, [role="main"], .content, #content, .container');
-        if (mainArea) {
-          // Strip header/footer/nav from the copy
-          const clone = mainArea.cloneNode(true);
-          clone.querySelectorAll('header, footer, nav, script, style, ' +
-            '[class*="header"], [class*="footer"], [class*="navi"], ' +
-            '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
-            '[class*="ad-"], [class*="advertise"], [class*="recommend"]'
-          ).forEach(el => el.remove());
-          description = clone.innerText.trim();
-          if (description.length >= 30) {
-            log.push(`  Page-text fallback (main): ${description.length} chars`);
-          }
-        }
-
-        // Strategy 2: If still empty, clone body and strip junk
-        if (!description || description.length < 30) {
-          const bodyClone = document.body.cloneNode(true);
-          bodyClone.querySelectorAll('header, footer, nav, script, style, ' +
-            '[class*="header"], [class*="footer"], [class*="navi"], ' +
-            '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
-            '[class*="ad-"], [class*="advertise"], [class*="recommend"], ' +
-            '[class*="pagination"], [class*="breadcrumb"]'
-          ).forEach(el => el.remove());
-          description = bodyClone.innerText.trim();
-          log.push(`  Page-text fallback (body): ${description.length} chars`);
+      // Try <main>/<article> area first
+      const mainArea = document.querySelector('main, article, [role="main"], .content, #content, .container');
+      if (mainArea) {
+        const clone = mainArea.cloneNode(true);
+        clone.querySelectorAll('header, footer, nav, script, style, ' +
+          '[class*="header"], [class*="footer"], [class*="navi"], ' +
+          '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
+          '[class*="ad-"], [class*="advertise"], [class*="recommend"]'
+        ).forEach(el => el.remove());
+        fallbackDescription = clone.innerText.trim();
+        if (fallbackDescription.length >= 30) {
+          log.push(`  Fallback (main): ${fallbackDescription.length} chars`);
         }
       }
+
+      // Try <body> with more aggressive stripping
+      if (!fallbackDescription || fallbackDescription.length < 100) {
+        const bodyClone = document.body.cloneNode(true);
+        bodyClone.querySelectorAll('header, footer, nav, script, style, ' +
+          '[class*="header"], [class*="footer"], [class*="navi"], ' +
+          '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
+          '[class*="ad-"], [class*="advertise"], [class*="recommend"], ' +
+          '[class*="pagination"], [class*="breadcrumb"], ' +
+          '[class*="widget"], [class*="chat"], [class*="footer-"]'
+        ).forEach(el => el.remove());
+        fallbackDescription = bodyClone.innerText.trim();
+        if (fallbackDescription.length >= 30) {
+          log.push(`  Fallback (body): ${fallbackDescription.length} chars`);
+        }
+      }
+
+      // Pick the LONGEST description — CSS selectors often match wrong elements
+      let description;
+      if (cssDescription.length > 50 && cssDescription.length >= fallbackDescription.length * 0.8) {
+        // CSS result is decent and comparable to fallback, trust it
+        description = cssDescription;
+        log.push(`  → Using CSS description (${cssDescription.length} chars)`);
+      } else if (fallbackDescription.length >= 30) {
+        // Fallback is better — use it
+        description = fallbackDescription;
+        log.push(`  → Using page-text fallback (${fallbackDescription.length} chars)`);
+      } else {
+        // Neither worked, use whatever CSS gave us
+        description = cssDescription || fallbackDescription;
+        log.push(`  → Using minimal text (${description.length} chars)`);
+      }
+
+      log.push(`Final description: ${description.length} chars`);
       log.push(`Description: ${description.length} chars`);
 
       // ── Key Skills ──
@@ -399,6 +421,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'scrape') {
     try {
       const result = scrapeCurrentPage(request.options || {});
+
+      // If description is too short, wait 3s and retry (JS may still be rendering)
+      if (result.data && result.data.length > 0) {
+        const item = result.data[0];
+        if (item && (!item.description || item.description.length < 100)) {
+          setTimeout(() => {
+            const retryResult = scrapeCurrentPage(request.options || {});
+            if (retryResult.data && retryResult.data.length > 0) {
+              const retryItem = retryResult.data[0];
+              if (retryItem && retryItem.description && retryItem.description.length > (item.description || '').length) {
+                // Retry got better data, update extraction log
+                retryResult.extractionLog.unshift('[Retry after 3s — got more content]');
+                sendResponse(retryResult);
+                return;
+              }
+            }
+            // Retry didn't help, send original result
+            result.extractionLog.push('[Retry after 3s — no improvement]');
+            sendResponse(result);
+          }, 3000);
+          return true; // Keep channel open for async retry
+        }
+      }
+
       sendResponse(result);
     } catch (err) {
       sendResponse({
