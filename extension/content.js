@@ -221,6 +221,15 @@ const SITE = {
         // Fallback is better — use it
         description = fallbackDescription;
         log.push(`  → Using page-text fallback (${fallbackDescription.length} chars)`);
+
+        // Apply smart trimming to remove junk (company info, reviews, salaries, etc.)
+        const trimmed = smartTrimDescription(description);
+        if (trimmed.length >= 30) {
+          log.push(`  Smart-trimmed from ${description.length} to ${trimmed.length} chars`);
+          description = trimmed;
+        } else {
+          log.push(`  Smart-trim skipped (no markers found, text unchanged)`);
+        }
       } else {
         // Neither worked, use whatever CSS gave us
         description = cssDescription || fallbackDescription;
@@ -228,7 +237,6 @@ const SITE = {
       }
 
       log.push(`Final description: ${description.length} chars`);
-      log.push(`Description: ${description.length} chars`);
 
       // ── Key Skills ──
       const skills = findAll([
@@ -396,6 +404,87 @@ const SITE = {
     },
   },
 };
+
+// ─── Smart Description Trimmer (cuts junk before/after the actual JD) ──────
+
+function smartTrimDescription(text) {
+  if (!text || text.length < 50) return text;
+
+  // Start markers - find the EARLIEST one that appears
+  const startMarkers = [
+    'Job description',
+    'Job Description',
+    'We are looking for',
+    "You'll make an impact by",
+    'Your key responsibilities',
+    "What you'll do",
+    'About the role',
+    'About this role',
+    'Job Description:',
+    'Job description:',
+  ];
+
+  // End markers - find the EARLIEST one that appears AFTER the start
+  const endMarkers = [
+    '\nRole:',
+    '\nRole :',
+    '\nIndustry Type:',
+    '\nIndustry :',
+    '\nCompany Info',
+    '\nKey highlights',
+    '\nCompany reviews',
+    '\nAbout Company',
+    '\nBeware of imposters',
+    '\nroles you might be interested in',
+    '\nSimilar Jobs',
+    '\nSimilar jobs',
+    '\nHome Jobs',
+    '\nEmployee reviews',
+    '\nSalary & Benefits',
+    '\nPerks and Benefits',
+    '\nCompany website',
+    '\nFollow',
+    '\nKickstart your',
+    '\nReport this',
+  ];
+
+  // Find start
+  let startIdx = -1;
+  let usedStartMarker = '';
+  for (const marker of startMarkers) {
+    const idx = text.indexOf(marker);
+    if (idx >= 0) {
+      if (startIdx === -1 || idx < startIdx) {
+        startIdx = idx;
+        usedStartMarker = marker;
+      }
+    }
+  }
+
+  if (startIdx >= 0) {
+    // Cut from the start marker
+    text = text.substring(startIdx);
+    // Remove the marker text itself (it's just a section header)
+    if (text.startsWith(usedStartMarker)) {
+      text = text.substring(usedStartMarker.length).trim();
+    }
+  }
+
+  // Find end
+  let endIdx = text.length;
+  for (const marker of endMarkers) {
+    const idx = text.indexOf(marker);
+    if (idx >= 0 && idx < endIdx) {
+      endIdx = idx;
+    }
+  }
+
+  text = text.substring(0, endIdx).trim();
+
+  // If we trimmed nothing meaningful, return original
+  if (text.length < 30) return '';
+  return text;
+}
 
 // ─── Bullet Point Extraction ────────────────────────────────────────────────
 
