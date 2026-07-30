@@ -34,3 +34,10 @@ output/
 
 # Playwright browsers (large binaries - install on-demand)
 ms-playwright/
+
+# Debug scripts
+debug_*.py
+
+# Test files
+test_*.xlsx
+test_*.py
