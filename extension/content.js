@@ -157,7 +157,10 @@ const SITE = {
 
       // ── Job Description (the full text!) ──
       // Strategy A: Try CSS selectors for targeted extraction
+      // #1: Exact CSS-module container for Naukri job descriptions (user-confirmed)
       let cssDescription = find([
+        'div[class*="JDC__dang-inner-html"]', // Naukri CSS-module exact description container
+        'div[class*="dang-inner-html"]',       // Naukri broader pattern
         '.job-details-description',           // Naukri class
         'div[class*="jd-desc"]',              // Naukri description
         'div[class*="description"]',          // Generic
