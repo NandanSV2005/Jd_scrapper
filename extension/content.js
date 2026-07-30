@@ -169,8 +169,44 @@ const SITE = {
         '.styles_jd-header-description',      // Naukri styled
         '[class*="detail-section"]',           // Generic
         'div[class*="text-container"]',        // Generic
+        '[class*="jd-section"]',              // Naukri sections
+        'div[class*="styles_jd"]',            // Naukri CSS-modules pattern
       ]);
-      log.push(description ? `Description: ${description.length} chars` : 'Description: NOT FOUND');
+
+      // ── If selectors failed, use page-text fallback ──
+      if (!description || description.length < 30) {
+        log.push('Description selectors failed — trying page-text fallback...');
+
+        // Strategy 1: Grab text from <main> or <article>
+        const mainArea = document.querySelector('main, article, [role="main"], .content, #content, .container');
+        if (mainArea) {
+          // Strip header/footer/nav from the copy
+          const clone = mainArea.cloneNode(true);
+          clone.querySelectorAll('header, footer, nav, script, style, ' +
+            '[class*="header"], [class*="footer"], [class*="navi"], ' +
+            '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
+            '[class*="ad-"], [class*="advertise"], [class*="recommend"]'
+          ).forEach(el => el.remove());
+          description = clone.innerText.trim();
+          if (description.length >= 30) {
+            log.push(`  Page-text fallback (main): ${description.length} chars`);
+          }
+        }
+
+        // Strategy 2: If still empty, clone body and strip junk
+        if (!description || description.length < 30) {
+          const bodyClone = document.body.cloneNode(true);
+          bodyClone.querySelectorAll('header, footer, nav, script, style, ' +
+            '[class*="header"], [class*="footer"], [class*="navi"], ' +
+            '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
+            '[class*="ad-"], [class*="advertise"], [class*="recommend"], ' +
+            '[class*="pagination"], [class*="breadcrumb"]'
+          ).forEach(el => el.remove());
+          description = bodyClone.innerText.trim();
+          log.push(`  Page-text fallback (body): ${description.length} chars`);
+        }
+      }
+      log.push(`Description: ${description.length} chars`);
 
       // ── Key Skills ──
       const skills = findAll([

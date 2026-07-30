@@ -203,8 +203,7 @@ function generateCSV(data) {
   const headers = [
     'S.No', 'Company Name', 'Job Role',
     'Job Description (Bullet Points)', 'Key Skills',
-    'Location', 'Experience', 'Education',
-    'Employment Type', 'Department', 'Industry',
+    'Education', 'Employment Type', 'Department', 'Industry',
     'Source',
   ];
 
@@ -226,8 +225,6 @@ function generateCSV(data) {
       item.role || '',
       descText,
       skillsText,
-      item.location || '',
-      item.experience || '',
       item.education || '',
       item.employmentType || '',
       item.department || '',
