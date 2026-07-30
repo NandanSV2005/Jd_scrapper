@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Job Scraper Pro",
-  "version": "1.0.0",
-  "description": "Extract company names, job roles, and descriptions from any website and export to Excel",
+  "version": "3.0.0",
+  "description": "Auto-crawl Naukri job listing pages → visit each job → extract full description, company, role & skills → export to CSV",
   "permissions": [
     "activeTab",
     "downloads",
-    "scripting"
+    "scripting",
+    "tabs"
   ],
   "host_permissions": [
     "http://*/*",

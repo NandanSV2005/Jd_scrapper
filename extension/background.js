@@ -1,6 +1,7 @@
 /**
- * Job Scraper Pro - Background Service Worker
- * Manages batch scraping: creates hidden tabs, scrapes job pages, reports progress
+ * Job Scraper Pro - Background Service Worker v3.0
+ * Manages batch scraping: creates hidden tabs, scrapes job pages, reports progress.
+ * Uses the user's real browser session so Naukri/Aggregator authenticate correctly.
  */
 
 // ─── Batch State ──────────────────────────────────────────────────────────
@@ -24,11 +25,7 @@ function delay(ms) {
 // ─── Extension Installation ───────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason === 'install') {
-    console.log('[Job Scraper] Extension installed!');
-  } else if (details.reason === 'update') {
-    console.log('[Job Scraper] Extension updated');
-  }
+  console.log(`[Job Scraper] Extension ${details.reason === 'install' ? 'installed' : 'updated'}`);
 });
 
 // ─── Messaging ────────────────────────────────────────────────────────────
@@ -48,7 +45,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ error: 'Batch already in progress' });
       return;
     }
-    // Start the batch asynchronously
     startBatchScrape(request.urls).catch(err => console.error('[Batch] Fatal:', err));
     sendResponse({ started: true, total: request.urls.length });
     return false;
@@ -76,7 +72,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // ─── Batch Scrape Coordinator ─────────────────────────────────────────────
 
 async function startBatchScrape(urls) {
-  const validUrls = urls.filter(u => u && u.url && !u.url.startsWith('chrome://'));
+  const validUrls = urls.filter(u => u && u.url && !u.url.startsWith('chrome://') && !u.url.startsWith('about:'));
 
   batchState.urls = validUrls;
   batchState.results = [];
@@ -86,7 +82,6 @@ async function startBatchScrape(urls) {
   batchState.isCancelled = false;
   batchState.errors = [];
 
-  // Notify popup that batch started
   notifyPopup('batch-started', { total: validUrls.length });
 
   for (let i = 0; i < validUrls.length; i++) {
@@ -103,20 +98,21 @@ async function startBatchScrape(urls) {
       current: i + 1,
       total: validUrls.length,
       url: jobLink.url,
-      company: jobLink.company,
-      role: jobLink.role,
+      company: jobLink.company || '',
+      role: jobLink.role || '',
     });
 
-    console.log(`[Batch] [${i + 1}/${validUrls.length}] Processing: ${jobLink.url.substring(0, 80)}...`);
+    console.log(`[Batch] [${i + 1}/${validUrls.length}] ${jobLink.company || '?'} — ${(jobLink.role || '').substring(0, 60)}`);
 
     try {
+      // Create a hidden tab to load the job page
       const tab = await createTab(jobLink.url);
       if (!tab || !tab.id) {
         batchState.errors.push({ url: jobLink.url, error: 'Failed to create tab' });
         continue;
       }
 
-      // Wait for tab to fully load
+      // Wait for the tab to fully load (including JS rendering)
       const loaded = await waitForTabLoad(tab.id);
       if (!loaded) {
         batchState.errors.push({ url: jobLink.url, error: 'Tab load timeout' });
@@ -124,36 +120,20 @@ async function startBatchScrape(urls) {
         continue;
       }
 
-      // Extra wait for dynamic content (JS-rendered pages like LinkedIn/Naukri)
-      await delay(3500);
+      // Extra wait for dynamic content (JS-rendered job pages)
+      await delay(2000);
 
       // Send scrape message to the tab's content script
-      let result = await sendMessageToTab(tab.id, {
-        action: 'scrape',
-        options: { dedup: true, deepMode: true },
-      });
-
-      // If content script didn't respond, try injecting it
-      if (!result) {
-        console.log(`[Batch] [${i + 1}/${validUrls.length}] Content script not responding — trying injection...`);
-        try {
-          await chrome.tabs.executeScript(tab.id, { file: 'content.js' });
-          await delay(1500);
-          result = await sendMessageToTab(tab.id, {
-            action: 'scrape',
-            options: { dedup: true, deepMode: true },
-          });
-        } catch (injectErr) {
-          console.log(`[Batch] Injection also failed: ${injectErr.message}`);
-        }
-      }
+      let result = await sendMessageToTab(tab.id, { action: 'scrape', options: { dedup: true, deepMode: true } });
 
       if (result && result.data && result.data.length > 0) {
-        // Add company/role from listing card if extraction failed on detail page
-        const enriched = result.data.map(item => ({
-          ...item,
-          company: (item.company && !item.company.startsWith('[COMPANY_')) ? item.company : (jobLink.company || item.company),
-          role: (item.role && !item.role.startsWith('[ROLE_')) ? item.role : (jobLink.role || item.role),
+        const item = result.data[0];
+        // Enrich with listing card data if job page extraction was incomplete
+        batchState.results.push({
+          company: (item.company && !item.company.startsWith('[COMPANY_')) ? item.company : (jobLink.company || item.company || ''),
+          role: (item.role && !item.role.startsWith('[ROLE_')) ? item.role : (jobLink.role || item.role || ''),
+          description: item.description || '',
+          descriptionBullets: item.descriptionBullets || [],
           skills: item.skills || [],
           highlights: item.highlights || '',
           location: item.location || '',
@@ -162,46 +142,55 @@ async function startBatchScrape(urls) {
           employmentType: item.employmentType || '',
           department: item.department || '',
           industry: item.industry || '',
-        }));
-        batchState.results.push(...enriched);
-        console.log(`[Batch] [${i + 1}/${validUrls.length}] Got ${enriched.length} entry(ies)`);
+          source: item.source || 'batch',
+        });
+        const descLen = (item.description || '').length;
+        console.log(`[Batch] [${i + 1}/${validUrls.length}] ✓ ${item.company} — ${descLen} chars in description`);
       } else {
-        // If scraping failed, create entry from what we have from the listing card
+        // Fallback: use listing card data (company + role only)
         if (jobLink.company) {
           batchState.results.push({
             company: jobLink.company,
-            role: jobLink.role || '[ROLE_NOT_FOUND]',
+            role: jobLink.role || '',
             description: '',
             descriptionBullets: [],
-            source: 'batch-listing-card',
+            skills: [],
+            highlights: '',
+            location: '',
+            experience: '',
+            education: '',
+            employmentType: '',
+            department: '',
+            industry: '',
+            source: 'batch-card-fallback',
           });
-          console.log(`[Batch] [${i + 1}/${validUrls.length}] Using listing card data for: ${jobLink.company}`);
+          console.log(`[Batch] [${i + 1}/${validUrls.length}] ⚠ Using listing card data (no extract): ${jobLink.company}`);
         } else {
           batchState.errors.push({ url: jobLink.url, error: 'No data extracted' });
-          console.log(`[Batch] [${i + 1}/${validUrls.length}] No data extracted`);
+          console.log(`[Batch] [${i + 1}/${validUrls.length}] ✗ No data`);
         }
       }
 
       // Close the tab
       safeCloseTab(tab.id);
     } catch (err) {
-      console.error(`[Batch] Error processing ${jobLink.url}:`, err);
+      console.error(`[Batch] Error:`, err);
       batchState.errors.push({ url: jobLink.url, error: err.message });
     }
 
-    // Rate limiting: wait between requests
+    // Rate limiting between requests
     if (i < validUrls.length - 1 && !batchState.isCancelled) {
-      await delay(1500);
+      await delay(1500 + Math.random() * 1000); // 1.5-2.5s delay to be nice to the server
     }
   }
 
   batchState.isRunning = false;
-  console.log(`[Batch] Complete: ${batchState.results.length} entries from ${batchState.currentIndex} of ${validUrls.length} URLs`);
+  console.log(`[Batch] Complete: ${batchState.results.length} entries`);
 
-  // Notify popup that batch is done
+  // Notify popup
   notifyPopup('batch-complete', {
     totalUrls: validUrls.length,
-    processedUrls: batchState.currentIndex,
+    processedUrls: batchState.currentIndex + 1,
     resultsCount: batchState.results.length,
     errorsCount: batchState.errors.length,
     results: batchState.results,
@@ -221,28 +210,30 @@ function createTab(url) {
 
 function waitForTabLoad(tabId) {
   return new Promise((resolve) => {
-    const timeout = 15000; // 15 second timeout
+    const TIMEOUT = 20000;
     let resolved = false;
 
     const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true;
-        resolve(false); // timeout
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(false);
       }
-    }, timeout);
+    }, TIMEOUT);
 
     function listener(updatedTabId, changeInfo) {
       if (updatedTabId === tabId && changeInfo.status === 'complete' && !resolved) {
         resolved = true;
         clearTimeout(timer);
-        // Wait a small additional time for content script initialization
-        setTimeout(() => resolve(true), 500);
+        chrome.tabs.onUpdated.removeListener(listener);
+        // Small extra wait for content script init
+        setTimeout(() => resolve(true), 800);
       }
     }
 
     chrome.tabs.onUpdated.addListener(listener);
 
-    // Also resolve if tab doesn't exist or errors
+    // Safety timeout
     setTimeout(() => {
       if (!resolved) {
         resolved = true;
@@ -250,7 +241,7 @@ function waitForTabLoad(tabId) {
         chrome.tabs.onUpdated.removeListener(listener);
         resolve(false);
       }
-    }, timeout + 1000);
+    }, TIMEOUT + 2000);
   });
 }
 
