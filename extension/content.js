@@ -156,87 +156,111 @@ const SITE = {
       log.push(role ? `Role: "${role.substring(0, 80)}"` : 'Role: NOT FOUND');
 
       // ── Job Description (the full text!) ──
-      // Strategy A: Try CSS selectors for targeted extraction
-      // #1: Exact CSS-module container for Naukri job descriptions (user-confirmed)
-      let cssDescription = find([
+      // Strategy A: Try the EXACT CSS-module container FIRST (user-confirmed via Inspect).
+      // It contains ONLY the clean job description with proper <ul>/<li> structure —
+      // no company reviews, salaries, benefits, or similar-jobs junk.
+      // If found, use it UNCONDITIONALLY and skip the messy fallback entirely.
+      const exactSelectors = [
         'div[class*="JDC__dang-inner-html"]', // Naukri CSS-module exact description container
         'div[class*="dang-inner-html"]',       // Naukri broader pattern
-        '.job-details-description',           // Naukri class
-        'div[class*="jd-desc"]',              // Naukri description
-        'div[class*="description"]',          // Generic
-        'section[id*="description"]',         // Section ID
-        'div[id*="description"]',             // Div ID
-        'div[class*="job-desc"]',             // Generic
-        'div[class*="details-section"]',      // Naukri details
-        'div[class*="job-detail"]',           // Generic
-        'section[class*="description"]',      // Generic section
-        '.styles_jd-header-description',      // Naukri styled
-        '[class*="detail-section"]',           // Generic
-        'div[class*="text-container"]',        // Generic
-        '[class*="jd-section"]',              // Naukri sections
-        'div[class*="styles_jd"]',            // Naukri CSS-modules pattern
-      ]);
-      log.push(cssDescription ? `  CSS description: ${cssDescription.length} chars` : '  CSS description: none');
-
-      // Strategy B: ALWAYS run page-text fallback (regardless of CSS result)
-      // This ensures we get text even if CSS selectors match the wrong element
-      let fallbackDescription = '';
-      log.push('  Running page-text fallback...');
-
-      // Try <main>/<article> area first
-      const mainArea = document.querySelector('main, article, [role="main"], .content, #content, .container');
-      if (mainArea) {
-        const clone = mainArea.cloneNode(true);
-        clone.querySelectorAll('header, footer, nav, script, style, ' +
-          '[class*="header"], [class*="footer"], [class*="navi"], ' +
-          '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
-          '[class*="ad-"], [class*="advertise"], [class*="recommend"]'
-        ).forEach(el => el.remove());
-        fallbackDescription = clone.innerText.trim();
-        if (fallbackDescription.length >= 30) {
-          log.push(`  Fallback (main): ${fallbackDescription.length} chars`);
-        }
+      ];
+      let description = '';
+      let usedExactContainer = false;
+      for (const sel of exactSelectors) {
+        try {
+          const el = document.querySelector(sel);
+          if (el) {
+            // innerText (not textContent) preserves line breaks between <li> items,
+            // so extractBullets() can split them into proper bullet points.
+            const text = el.innerText.trim();
+            if (text && text.length > 30) {
+              description = text;
+              usedExactContainer = true;
+              break;
+            }
+          }
+        } catch (e) { /* invalid selector, skip */ }
       }
+      log.push(usedExactContainer
+        ? `  ✓ Exact description container found: ${description.length} chars (no fallback needed)`
+        : '  Exact description container: NOT FOUND — using fallback chain');
 
-      // Try <body> with more aggressive stripping
-      if (!fallbackDescription || fallbackDescription.length < 100) {
-        const bodyClone = document.body.cloneNode(true);
-        bodyClone.querySelectorAll('header, footer, nav, script, style, ' +
-          '[class*="header"], [class*="footer"], [class*="navi"], ' +
-          '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
-          '[class*="ad-"], [class*="advertise"], [class*="recommend"], ' +
-          '[class*="pagination"], [class*="breadcrumb"], ' +
-          '[class*="widget"], [class*="chat"], [class*="footer-"]'
-        ).forEach(el => el.remove());
-        fallbackDescription = bodyClone.innerText.trim();
-        if (fallbackDescription.length >= 30) {
-          log.push(`  Fallback (body): ${fallbackDescription.length} chars`);
+      // Strategy B: Only run the fallback chain if the exact container was NOT found
+      if (!usedExactContainer) {
+        // Try remaining CSS selectors for targeted extraction
+        let cssDescription = find([
+          '.job-details-description',           // Naukri class
+          'div[class*="jd-desc"]',              // Naukri description
+          'div[class*="description"]',          // Generic
+          'section[id*="description"]',         // Section ID
+          'div[id*="description"]',             // Div ID
+          'div[class*="job-desc"]',             // Generic
+          'div[class*="details-section"]',      // Naukri details
+          'div[class*="job-detail"]',           // Generic
+          'section[class*="description"]',      // Generic section
+          '.styles_jd-header-description',      // Naukri styled
+          '[class*="detail-section"]',           // Generic
+          'div[class*="text-container"]',        // Generic
+          '[class*="jd-section"]',              // Naukri sections
+          'div[class*="styles_jd"]',            // Naukri CSS-modules pattern
+        ]);
+        log.push(cssDescription ? `  CSS description: ${cssDescription.length} chars` : '  CSS description: none');
+
+        // ALWAYS run page-text fallback as a safety net (may include junk, smart-trimmed below)
+        let fallbackDescription = '';
+        log.push('  Running page-text fallback...');
+
+        // Try <main>/<article> area first
+        const mainArea = document.querySelector('main, article, [role="main"], .content, #content, .container');
+        if (mainArea) {
+          const clone = mainArea.cloneNode(true);
+          clone.querySelectorAll('header, footer, nav, script, style, ' +
+            '[class*="header"], [class*="footer"], [class*="navi"], ' +
+            '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
+            '[class*="ad-"], [class*="advertise"], [class*="recommend"]'
+          ).forEach(el => el.remove());
+          fallbackDescription = clone.innerText.trim();
+          if (fallbackDescription.length >= 30) {
+            log.push(`  Fallback (main): ${fallbackDescription.length} chars`);
+          }
         }
-      }
 
-      // Pick the LONGEST description — CSS selectors often match wrong elements
-      let description;
-      if (cssDescription.length > 50 && cssDescription.length >= fallbackDescription.length * 0.8) {
-        // CSS result is decent and comparable to fallback, trust it
-        description = cssDescription;
-        log.push(`  → Using CSS description (${cssDescription.length} chars)`);
-      } else if (fallbackDescription.length >= 30) {
-        // Fallback is better — use it
-        description = fallbackDescription;
-        log.push(`  → Using page-text fallback (${fallbackDescription.length} chars)`);
+        // Try <body> with more aggressive stripping
+        if (!fallbackDescription || fallbackDescription.length < 100) {
+          const bodyClone = document.body.cloneNode(true);
+          bodyClone.querySelectorAll('header, footer, nav, script, style, ' +
+            '[class*="header"], [class*="footer"], [class*="navi"], ' +
+            '[class*="sidebar"], [class*="aside"], [class*="banner"], ' +
+            '[class*="ad-"], [class*="advertise"], [class*="recommend"], ' +
+            '[class*="pagination"], [class*="breadcrumb"], ' +
+            '[class*="widget"], [class*="chat"], [class*="footer-"]'
+          ).forEach(el => el.remove());
+          fallbackDescription = bodyClone.innerText.trim();
+          if (fallbackDescription.length >= 30) {
+            log.push(`  Fallback (body): ${fallbackDescription.length} chars`);
+          }
+        }
 
-        // Apply smart trimming to remove junk (company info, reviews, salaries, etc.)
-        const trimmed = smartTrimDescription(description);
-        if (trimmed.length >= 30) {
-          log.push(`  Smart-trimmed from ${description.length} to ${trimmed.length} chars`);
-          description = trimmed;
+        // Pick the LONGEST of the two fallback sources
+        if (cssDescription.length > 50 && cssDescription.length >= fallbackDescription.length * 0.8) {
+          description = cssDescription;
+          log.push(`  → Using CSS description (${cssDescription.length} chars)`);
+        } else if (fallbackDescription.length >= 30) {
+          description = fallbackDescription;
+          log.push(`  → Using page-text fallback (${fallbackDescription.length} chars)`);
+
+          // Apply smart trimming to remove junk (company info, reviews, salaries, etc.)
+          const trimmed = smartTrimDescription(description);
+          if (trimmed.length >= 30) {
+            log.push(`  Smart-trimmed from ${description.length} to ${trimmed.length} chars`);
+            description = trimmed;
+          } else {
+            log.push('  Smart-trim skipped (no markers found, text unchanged)');
+          }
         } else {
-          log.push(`  Smart-trim skipped (no markers found, text unchanged)`);
+          description = cssDescription || fallbackDescription;
+          log.push(`  → Using minimal text (${description.length} chars)`);
         }
-      } else {
-        // Neither worked, use whatever CSS gave us
-        description = cssDescription || fallbackDescription;
-        log.push(`  → Using minimal text (${description.length} chars)`);
       }
 
       log.push(`Final description: ${description.length} chars`);
