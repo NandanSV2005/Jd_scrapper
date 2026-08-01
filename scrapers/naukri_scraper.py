@@ -39,6 +39,9 @@ class NaukriScraper(BaseScraper):
                         job_role=jd.get("role", "Software Role"),
                         description=jd.get("description", ""),
                         description_bullets=jd.get("descriptionBullets", []),
+                        skills=jd.get("skills", []),
+                        location=jd.get("location", ""),
+                        experience=jd.get("experience", ""),
                         source="Naukri",
                     )
                     if not self.is_duplicate(job.job_role + job.company):

@@ -21,6 +21,9 @@ class JobListing:
     job_role: str = ""
     description: str = ""
     description_bullets: list = field(default_factory=list)
+    skills: list = field(default_factory=list)
+    location: str = ""
+    experience: str = ""
     source: str = ""
 
 

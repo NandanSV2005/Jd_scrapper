@@ -16,6 +16,10 @@ from openpyxl.utils import get_column_letter
 from scrapers.base_scraper import JobListing
 
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_SCRAPED_JDS_DIR = os.path.join(PROJECT_ROOT, "scraped_jds")
+
+
 COMMON_SKILLS_REF = [
     "React", "Next.js", "TypeScript", "JavaScript", "Node.js", "Python", "FastAPI",
     "Django", "Flask", "PostgreSQL", "MySQL", "MongoDB", "Redis", "Docker",
@@ -78,15 +82,22 @@ class ExcelWriter:
 
         col_widths = {
             "A": 8,    # S.No
-            "B": 30,   # Company
-            "C": 35,   # Job Role
-            "D": 80,   # Job Description
-            "E": 15,   # Source
+            "B": 28,   # Company
+            "C": 32,   # Job Role
+            "D": 70,   # Job Description
+            "E": 35,   # Key Skills (Bullet Points)
+            "F": 20,   # Location
+            "G": 15,   # Experience
+            "H": 15,   # Source
         }
         for col, width in col_widths.items():
             ws.column_dimensions[col].width = width
 
-        headers = ["S.No", "Company Name", "Job Role", "Job Description (Bullet Points)", "Source"]
+        headers = [
+            "S.No", "Company Name", "Job Role",
+            "Job Description (Bullet Points)", "Key Skills (Bullet Points)",
+            "Location", "Experience", "Source"
+        ]
         for col_idx, header in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col_idx, value=header)
             cell.fill = self.HEADER_FILL
@@ -104,11 +115,25 @@ class ExcelWriter:
             else:
                 bullets_text = "No description available"
 
+            # Format Key Skills as bullet points
+            if job.skills and isinstance(job.skills, list):
+                skills_bullets = "\n".join(f"• {s.strip()}" for s in job.skills if s and str(s).strip())
+            elif job.skills and isinstance(job.skills, str):
+                skills_bullets = "\n".join(f"• {s.strip()}" for s in job.skills.split(",") if s.strip())
+            elif job.description:
+                extracted = extract_skills_from_text(job.description)
+                skills_bullets = "\n".join(f"• {s}" for s in extracted)
+            else:
+                skills_bullets = "• N/A"
+
             row_data = [
                 row_idx - 1,
                 job.company,
                 job.job_role,
                 bullets_text,
+                skills_bullets,
+                job.location or "N/A",
+                job.experience or "N/A",
                 job.source,
             ]
 
@@ -117,20 +142,20 @@ class ExcelWriter:
                 cell.font = self.CELL_FONT
                 cell.border = self.THIN_BORDER
 
-                if col_idx in (2, 3, 5):
+                if col_idx in (2, 3, 6, 7, 8):
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
-                elif col_idx == 4:
+                elif col_idx in (4, 5):
                     cell.alignment = self.BULLET_ALIGNMENT
                 elif col_idx == 1:
                     cell.alignment = Alignment(horizontal="center", vertical="top")
 
             if row_idx % 2 == 0:
-                for col_idx in range(1, 6):
+                for col_idx in range(1, 9):
                     ws.cell(row=row_idx, column=col_idx).fill = self.ALT_ROW_FILL
 
         wb.save(filepath)
         print(f"[Excel] Saved {len(jobs)} job listings to: {filepath}")
-        
+
         # Also export to NextBuild scraped_jds folder automatically
         try:
             self.export_to_nextbuild_folder(jobs)
@@ -139,8 +164,10 @@ class ExcelWriter:
 
         return filepath
 
-    def export_to_nextbuild_folder(self, jobs: List[JobListing], target_dir: str = "../scraped_jds") -> List[str]:
+    def export_to_nextbuild_folder(self, jobs: List[JobListing], target_dir: str = "") -> List[str]:
         """Export scraped jobs into NextBuild's scraped_jds/*.json format."""
+        if not target_dir or not os.path.isabs(target_dir):
+            target_dir = DEFAULT_SCRAPED_JDS_DIR
         saved_files = []
         os.makedirs(target_dir, exist_ok=True)
 
@@ -151,13 +178,17 @@ class ExcelWriter:
             filepath = os.path.join(target_dir, filename)
 
             desc = job.description or ("\n".join(job.description_bullets) if job.description_bullets else f"{job.job_role} position at {job.company}.")
-            skills = extract_skills_from_text(desc)
+            
+            if job.skills and isinstance(job.skills, list):
+                skills = job.skills
+            else:
+                skills = extract_skills_from_text(desc)
 
             payload = {
                 "id": f"scraped-{clean_company}-{clean_role}",
                 "company": job.company or "Featured Organization",
                 "title": job.job_role or "Software Engineer",
-                "location": "Scraped Target Location",
+                "location": job.location or "Scraped Target Location",
                 "url": "#",
                 "descriptionSnippet": desc[:220] + ("..." if len(desc) > 220 else ""),
                 "requiredSkills": skills,

@@ -38,6 +38,57 @@ def clean_text(text: str) -> str:
     return text
 
 
+import os
+import json
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SCRAPED_JDS_DIR = os.path.join(PROJECT_ROOT, "scraped_jds")
+
+
+def export_to_nextbuild_folder(jobs: list, target_dir: str = "") -> list:
+    """Export scraped jobs into NextBuild's scraped_jds/*.json format."""
+    if not jobs:
+        return []
+    if not target_dir:
+        target_dir = SCRAPED_JDS_DIR
+    target_dir = os.path.abspath(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
+    saved_files = []
+
+    for job in jobs:
+        company = job.get('company') or job.get('company_name') or 'Naukri'
+        role = job.get('role') or job.get('job_role') or 'Software Developer'
+        clean_company = re.sub(r"[^a-zA-Z0-9]+", "_", company.lower()).strip("_") or "scraped"
+        clean_role = re.sub(r"[^a-zA-Z0-9]+", "_", role.lower()).strip("_") or "job"
+        filename = f"{clean_company}_{clean_role}.json"
+        filepath = os.path.join(target_dir, filename)
+
+        desc_bullets = job.get('descriptionBullets', [])
+        desc = job.get('description') or ('\n'.join(desc_bullets) if desc_bullets else f"{role} position at {company}.")
+        skills = job.get('skills') or []
+        if isinstance(skills, str):
+            skills = [s.strip() for s in skills.split(',') if s.strip()]
+
+        payload = {
+            "id": f"scraped-{clean_company}-{clean_role}",
+            "company": company,
+            "title": role,
+            "location": job.get('location') or "Scraped Target Location",
+            "url": job.get('url') or "#",
+            "descriptionSnippet": desc[:220] + ("..." if len(desc) > 220 else ""),
+            "requiredSkills": skills if skills else ["React", "TypeScript", "Python"],
+            "fullDescription": desc,
+        }
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        saved_files.append(filepath)
+        print(f"[NextBuild Scraped JD] Exported: {filepath}")
+
+    return saved_files
+
+
 def export_excel(jobs: list, filename: str = "jd_scraper_output.xlsx") -> str:
     """Export scraped jobs to a styled Excel file."""
     if not jobs:
@@ -68,7 +119,7 @@ def export_excel(jobs: list, filename: str = "jd_scraper_output.xlsx") -> str:
 
     headers = [
         'S.No', 'Company Name', 'Job Role',
-        'Job Description', 'Key Skills',
+        'Job Description', 'Key Skills (Bullet Points)',
         'Location', 'Experience',
         'Source'
     ]
@@ -85,7 +136,15 @@ def export_excel(jobs: list, filename: str = "jd_scraper_output.xlsx") -> str:
     for row_idx, job in enumerate(jobs, 2):
         desc_bullets = job.get('descriptionBullets', [])
         desc_text = '\n'.join(f'• {b}' for b in desc_bullets) if desc_bullets else job.get('description', '')
-        skills_str = ', '.join(job.get('skills', [])) if job.get('skills') else ''
+
+        # Format skills as bullet points
+        skills_raw = job.get('skills', [])
+        if isinstance(skills_raw, list) and skills_raw:
+            skills_str = '\n'.join(f'• {s.strip()}' for s in skills_raw if s and str(s).strip())
+        elif isinstance(skills_raw, str) and skills_raw:
+            skills_str = '\n'.join(f'• {s.strip()}' for s in skills_raw.split(',') if s.strip())
+        else:
+            skills_str = '• N/A'
 
         row_data = [
             row_idx - 1,
@@ -105,6 +164,13 @@ def export_excel(jobs: list, filename: str = "jd_scraper_output.xlsx") -> str:
 
     wb.save(filename)
     print(f"[OK] Saved {len(jobs)} jobs to '{filename}'")
+
+    # Export to NextBuild scraped_jds folder automatically
+    try:
+        export_to_nextbuild_folder(jobs)
+    except Exception as e:
+        print(f"[NextBuild Export Info]: {e}")
+
     return filename
 
 

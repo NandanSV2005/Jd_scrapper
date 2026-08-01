@@ -215,9 +215,9 @@ function generateCSV(data) {
       ? item.descriptionBullets.map(b => `• ${b}`).join('\n')
       : (item.description || '');
 
-    const skillsText = item.skills && Array.isArray(item.skills)
-      ? item.skills.join(', ')
-      : '';
+    const skillsText = item.skills && Array.isArray(item.skills) && item.skills.length > 0
+      ? item.skills.map(s => `• ${String(s).strip ? String(s).strip() : String(s).trim()}`).join('\n')
+      : (typeof item.skills === 'string' && item.skills.trim() ? item.skills.split(',').map(s => `• ${s.trim()}`).join('\n') : '');
 
     const row = [
       idx + 1,
