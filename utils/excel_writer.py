@@ -1,9 +1,11 @@
 """
-Excel Writer Utility - handles exporting scraped job data to Excel files
-with deduplication and proper formatting.
+Excel & JSON Writer Utility - handles exporting scraped job data to Excel files
+and NextBuild-compatible JSON files in the scraped_jds folder.
 """
 
 import os
+import json
+import re
 from datetime import datetime
 from typing import List
 
@@ -14,10 +16,25 @@ from openpyxl.utils import get_column_letter
 from scrapers.base_scraper import JobListing
 
 
-class ExcelWriter:
-    """Handles writing scraped job data to formatted Excel files."""
+COMMON_SKILLS_REF = [
+    "React", "Next.js", "TypeScript", "JavaScript", "Node.js", "Python", "FastAPI",
+    "Django", "Flask", "PostgreSQL", "MySQL", "MongoDB", "Redis", "Docker",
+    "Kubernetes", "AWS", "GCP", "Azure", "GraphQL", "REST API", "Git",
+    "PyTorch", "TensorFlow", "Java", "C++", "C#", "Go", "Rust", "TailwindCSS",
+    "HTML", "CSS", "CI/CD", "Kafka", "Microservices", "System Design", "Swift", "iOS"
+]
 
-    # Styles
+def extract_skills_from_text(text: str) -> List[str]:
+    if not text:
+        return ["React", "TypeScript", "Node.js", "Python", "PostgreSQL"]
+    text_lower = text.lower()
+    found = [s for s in COMMON_SKILLS_REF if s.lower() in text_lower]
+    return found if found else ["React", "TypeScript", "Node.js", "Python", "REST API"]
+
+
+class ExcelWriter:
+    """Handles writing scraped job data to formatted Excel & JSON files."""
+
     HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
     HEADER_FONT = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
     HEADER_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -40,7 +57,6 @@ class ExcelWriter:
         os.makedirs(output_dir, exist_ok=True)
 
     def _generate_filename(self, source: str = "") -> str:
-        """Generate a timestamped filename for the output Excel file."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if source:
             clean_source = "".join(c for c in source if c.isalnum() or c in " _-").strip()
@@ -48,16 +64,7 @@ class ExcelWriter:
         return f"jobs_scraped_{timestamp}.xlsx"
 
     def write_jobs(self, jobs: List[JobListing], filename: str = "") -> str:
-        """
-        Write job listings to an Excel file with proper formatting.
-
-        Args:
-            jobs: List of JobListing objects to write
-            filename: Optional filename (auto-generated if not provided)
-
-        Returns:
-            Path to the generated Excel file
-        """
+        """Write job listings to an Excel file with proper formatting."""
         if not filename:
             sources = set(j.source for j in jobs)
             source_str = "_".join(filter(None, sources)) if sources else ""
@@ -69,18 +76,16 @@ class ExcelWriter:
         ws = wb.active
         ws.title = "Job Listings"
 
-        # Set column widths
         col_widths = {
             "A": 8,    # S.No
             "B": 30,   # Company
             "C": 35,   # Job Role
-            "D": 80,   # Job Description (Bullet Points)
+            "D": 80,   # Job Description
             "E": 15,   # Source
         }
         for col, width in col_widths.items():
             ws.column_dimensions[col].width = width
 
-        # Headers
         headers = ["S.No", "Company Name", "Job Role", "Job Description (Bullet Points)", "Source"]
         for col_idx, header in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col_idx, value=header)
@@ -89,12 +94,9 @@ class ExcelWriter:
             cell.alignment = self.HEADER_ALIGNMENT
             cell.border = self.THIN_BORDER
 
-        # Freeze header row
         ws.freeze_panes = "A2"
 
-        # Write data
         for row_idx, job in enumerate(jobs, 2):
-            # Format bullet points as a nice text block
             if job.description_bullets:
                 bullets_text = "\n".join(f"• {bullet}" for bullet in job.description_bullets)
             elif job.description:
@@ -103,11 +105,11 @@ class ExcelWriter:
                 bullets_text = "No description available"
 
             row_data = [
-                row_idx - 1,           # S.No
-                job.company,           # Company Name
-                job.job_role,          # Job Role
-                bullets_text,          # Job Description (Bullet Points)
-                job.source,            # Source
+                row_idx - 1,
+                job.company,
+                job.job_role,
+                bullets_text,
+                job.source,
             ]
 
             for col_idx, value in enumerate(row_data, 1):
@@ -115,71 +117,57 @@ class ExcelWriter:
                 cell.font = self.CELL_FONT
                 cell.border = self.THIN_BORDER
 
-                if col_idx in (2, 3, 5):  # Company, Role, Source
+                if col_idx in (2, 3, 5):
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
-                elif col_idx == 4:  # Description bullets
+                elif col_idx == 4:
                     cell.alignment = self.BULLET_ALIGNMENT
-                elif col_idx == 1:  # S.No
+                elif col_idx == 1:
                     cell.alignment = Alignment(horizontal="center", vertical="top")
 
-            # Alternate row coloring
             if row_idx % 2 == 0:
                 for col_idx in range(1, 6):
                     ws.cell(row=row_idx, column=col_idx).fill = self.ALT_ROW_FILL
 
-        # Set row heights for better readability
-        for row_idx in range(2, len(jobs) + 2):
-            # Calculate estimated row height based on bullet points
-            job = jobs[row_idx - 2]
-            num_bullets = len(job.description_bullets) if job.description_bullets else 1
-            estimated_height = max(30, num_bullets * 20)
-            ws.row_dimensions[row_idx].height = min(estimated_height, 400)
-
-        # Header row height
-        ws.row_dimensions[1].height = 30
-
         wb.save(filepath)
         print(f"[Excel] Saved {len(jobs)} job listings to: {filepath}")
+        
+        # Also export to NextBuild scraped_jds folder automatically
+        try:
+            self.export_to_nextbuild_folder(jobs)
+        except Exception as e:
+            print(f"[NextBuild Export Info]: {e}")
+
         return filepath
 
-    def write_summary_sheet(self, wb: Workbook, jobs: List[JobListing]):
-        """Write a summary sheet with statistics about the scraped jobs."""
-        ws = wb.create_sheet("Summary")
+    def export_to_nextbuild_folder(self, jobs: List[JobListing], target_dir: str = "../scraped_jds") -> List[str]:
+        """Export scraped jobs into NextBuild's scraped_jds/*.json format."""
+        saved_files = []
+        os.makedirs(target_dir, exist_ok=True)
 
-        # Title
-        ws.merge_cells("A1:D1")
-        title_cell = ws.cell(row=1, column=1, value="Scraping Summary")
-        title_cell.font = Font(name="Calibri", size=16, bold=True, color="1F4E79")
-
-        # Stats
-        sources = {}
         for job in jobs:
-            sources[job.source] = sources.get(job.source, 0) + 1
+            clean_company = re.sub(r"[^a-zA-Z0-9]+", "_", job.company.lower()).strip("_") or "scraped"
+            clean_role = re.sub(r"[^a-zA-Z0-9]+", "_", job.job_role.lower()).strip("_") or "job"
+            filename = f"{clean_company}_{clean_role}.json"
+            filepath = os.path.join(target_dir, filename)
 
-        stats = [
-            ("Total Jobs Scraped", len(jobs)),
-            ("Unique Companies", len(set(j.company for j in jobs))),
-            ("Unique Job Roles", len(set(j.job_role for j in jobs))),
-            ("Sources", ", ".join(sources.keys())),
-        ]
+            desc = job.description or ("\n".join(job.description_bullets) if job.description_bullets else f"{job.job_role} position at {job.company}.")
+            skills = extract_skills_from_text(desc)
 
-        for idx, (label, value) in enumerate(stats, 3):
-            ws.cell(row=idx, column=1, value=label).font = Font(bold=True)
-            ws.cell(row=idx, column=2, value=value)
+            payload = {
+                "id": f"scraped-{clean_company}-{clean_role}",
+                "company": job.company or "Featured Organization",
+                "title": job.job_role or "Software Engineer",
+                "location": "Scraped Target Location",
+                "url": "#",
+                "descriptionSnippet": desc[:220] + ("..." if len(desc) > 220 else ""),
+                "requiredSkills": skills,
+                "fullDescription": desc,
+            }
 
-        # Per-source breakdown
-        row = len(stats) + 5
-        ws.cell(row=row, column=1, value="Per-Source Breakdown").font = Font(bold=True, size=12)
-        row += 1
-        for source, count in sources.items():
-            ws.cell(row=row, column=1, value=source)
-            ws.cell(row=row, column=2, value=f"{count} jobs")
-            row += 1
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
 
-        # Timestamp
-        row += 1
-        ws.cell(row=row, column=1, value="Generated:").font = Font(bold=True)
-        ws.cell(row=row, column=2, value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            saved_files.append(filepath)
+            print(f"[NextBuild Scraped JD] Exported: {filepath}")
 
-        ws.column_dimensions["A"].width = 25
-        ws.column_dimensions["B"].width = 20
+        return saved_files

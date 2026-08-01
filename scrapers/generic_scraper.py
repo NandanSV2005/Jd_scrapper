@@ -468,7 +468,7 @@ class GenericScraper(BaseScraper):
 
         return False
 
-    def scrape(self, url: str) -> ScrapeResult:
+    def scrape(self, url: str, use_playwright: bool = True) -> ScrapeResult:
         """
         Scrape company/job information from any URL.
 

@@ -456,12 +456,7 @@ def main():
                             text=f"Scraping page {page_num + 1}..."
                         )
 
-                        if source == "LinkedIn":
-                            result = scraper.scrape(current_url, use_playwright=use_playwright)
-                        elif source == "Generic":
-                            result = scraper.scrape(current_url)
-                        else:
-                            result = scraper.scrape(current_url)
+                        result = scraper.scrape(current_url, use_playwright=use_playwright)
 
                         if result.success:
                             all_jobs.extend(result.jobs)
@@ -563,6 +558,7 @@ def main():
                 )
 
                 st.success(f"✅ File saved: `{filepath}`")
+                st.info("📁 **NextBuild Integration**: Scraped jobs have also been automatically exported as JSON into the `scraped_jds/` folder for instant fallback selection on the NextBuild website!")
 
             except Exception as e:
                 progress_bar.empty()

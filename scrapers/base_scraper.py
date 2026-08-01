@@ -140,6 +140,6 @@ class BaseScraper:
         """Reset the duplicate tracking set (useful for new scraping sessions)."""
         BaseScraper._seen_descriptions.clear()
 
-    def scrape(self, url: str) -> ScrapeResult:
+    def scrape(self, url: str, use_playwright: bool = True) -> ScrapeResult:
         """Override in subclasses to implement site-specific scraping."""
         raise NotImplementedError("Subclasses must implement scrape()")
